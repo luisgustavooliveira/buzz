@@ -32,6 +32,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 /// App JWT lifetime. GitHub rejects JWTs over 10 minutes.
 const APP_JWT_LIFETIME_SECS: u64 = 600;
+// GitHub rejects App JWTs expiring more than 10 minutes out.
+const _: () = assert!(APP_JWT_LIFETIME_SECS <= 600);
 /// Installation tokens are used until this long before their expiry.
 const TOKEN_EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 /// Minimum spacing between private-key re-reads after a signing error.
@@ -591,10 +593,6 @@ mod tests {
         assert_eq!(claims.iss, "123456");
         assert_eq!(claims.iat, 1_000);
         assert_eq!(claims.exp, 1_000 + APP_JWT_LIFETIME_SECS);
-        assert!(
-            APP_JWT_LIFETIME_SECS <= 600,
-            "GitHub caps App JWTs at 10 min"
-        );
     }
 
     #[test]
