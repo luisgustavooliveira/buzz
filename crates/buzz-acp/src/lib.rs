@@ -6582,9 +6582,13 @@ mod workflow_owner_tests {
 
         for event in [
             // No marker at all.
-            bridge_event(&relay, Some(&owner), &[], &valid_mentions, &[
-                agent.as_str(),
-            ]),
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[],
+                &valid_mentions,
+                &[agent.as_str()],
+            ),
             // No owner tag.
             bridge_event(
                 &relay,
@@ -6675,7 +6679,10 @@ mod workflow_owner_tests {
             workflow_event(
                 &relay,
                 Some(&owner),
-                &[&["buzz:workflow", "true"], &["buzz:bridge-owner", owner.as_str()]],
+                &[
+                    &["buzz:workflow", "true"],
+                    &["buzz:bridge-owner", owner.as_str()],
+                ],
                 &[&["buzz:workflow-mention", agent.as_str()]],
                 &[agent.as_str()],
             ),

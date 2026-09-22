@@ -8,9 +8,7 @@ use nostr::{EventBuilder, Tag};
 
 use crate::client::{normalize_write_response, BuzzClient};
 use crate::error::CliError;
-use crate::validate::{
-    parse_uuid, read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64,
-};
+use crate::validate::{parse_uuid, read_file_or_stdin, read_or_stdin, sdk_err, validate_hex64};
 
 use super::messages::resolve_thread_ref;
 
@@ -60,7 +58,10 @@ fn is_repo_segment(segment: &str) -> bool {
 pub fn validate_github_assignee(login: &str) -> Result<(), CliError> {
     let ok = !login.is_empty()
         && login.len() <= MAX_LOGIN_CHARS
-        && login.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+        && login
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
         && login.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
     if !ok {
         return Err(CliError::Usage(format!(
@@ -117,10 +118,7 @@ fn validate_github_label(label: &str) -> Result<(), CliError> {
 /// With `source_event`, the bridge publishes the referenced message's content
 /// as the GitHub comment body instead of this event's own content.
 fn github_publish_tags(source_event: Option<&str>) -> Vec<Vec<String>> {
-    let mut tags = vec![vec![
-        "buzz:github-publish".to_string(),
-        "true".to_string(),
-    ]];
+    let mut tags = vec![vec!["buzz:github-publish".to_string(), "true".to_string()]];
     if let Some(event_id) = source_event {
         tags.push(vec![
             "github:source-event".to_string(),
@@ -164,8 +162,7 @@ fn attach_extra_tags(
     let tags = extra_tags
         .iter()
         .map(|tag| {
-            Tag::parse(tag)
-                .map_err(|e| CliError::Other(format!("invalid bridge tag {tag:?}: {e}")))
+            Tag::parse(tag).map_err(|e| CliError::Other(format!("invalid bridge tag {tag:?}: {e}")))
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(builder.tags(tags))
@@ -342,12 +339,10 @@ pub async fn dispatch(cmd: crate::GithubCmd, client: &BuzzClient) -> Result<(), 
                 }
                 None => match (channel, reply_to) {
                     (Some(channel), Some(reply_to)) => (channel, reply_to),
-                    _ => {
-                        return Err(CliError::Usage(
-                            "github publish requires either --link or both --channel and --reply-to"
-                                .into(),
-                        ))
-                    }
+                    _ => return Err(CliError::Usage(
+                        "github publish requires either --link or both --channel and --reply-to"
+                            .into(),
+                    )),
                 },
             };
             cmd_github_publish(
@@ -406,7 +401,13 @@ mod tests {
 
     #[test]
     fn github_repo_accepts_owner_repo_shapes() {
-        for repo in ["org/repo", "block/buzz", "a/b", "my-org/my_repo.v2", "O0/-."] {
+        for repo in [
+            "org/repo",
+            "block/buzz",
+            "a/b",
+            "my-org/my_repo.v2",
+            "O0/-.",
+        ] {
             assert!(validate_github_repo(repo).is_ok(), "rejected {repo:?}");
         }
     }
@@ -433,7 +434,10 @@ mod tests {
     #[test]
     fn github_assignee_follows_login_rules() {
         for login in ["a", "octocat", "Otto-Cat", "a".repeat(39).as_str()] {
-            assert!(validate_github_assignee(login).is_ok(), "rejected {login:?}");
+            assert!(
+                validate_github_assignee(login).is_ok(),
+                "rejected {login:?}"
+            );
         }
         for login in [
             "",
@@ -571,7 +575,10 @@ mod tests {
         };
 
         for (p, case) in [
-            (base_helper(&base, |p| p.repo = "no-slash".into()), "bad repo"),
+            (
+                base_helper(&base, |p| p.repo = "no-slash".into()),
+                "bad repo",
+            ),
             (base_helper(&base, |p| p.title = "  ".into()), "empty title"),
             (base_helper(&base, |p| p.body = None), "no body source"),
             (
@@ -598,7 +605,10 @@ mod tests {
         }
     }
 
-    fn base_helper(base: &OpenIssueParams, mutate: impl Fn(&mut OpenIssueParams)) -> OpenIssueParams {
+    fn base_helper(
+        base: &OpenIssueParams,
+        mutate: impl Fn(&mut OpenIssueParams),
+    ) -> OpenIssueParams {
         let mut p = OpenIssueParams {
             repo: base.repo.clone(),
             title: base.title.clone(),
@@ -730,10 +740,7 @@ mod tests {
         assert!(tag_values(&event, "github:source-event").is_empty());
         // Same event shape as `messages send --reply-to`: h tag + reply e tag.
         assert_eq!(tag_values(&event, "h"), vec![vec!["h", CHANNEL]]);
-        assert_eq!(
-            tag_values(&event, "e"),
-            vec![vec!["e", ID_A, "", "reply"]]
-        );
+        assert_eq!(tag_values(&event, "e"), vec![vec!["e", ID_A, "", "reply"]]);
     }
 
     #[tokio::test]
@@ -828,10 +835,7 @@ mod tests {
         .unwrap();
 
         let event = submitted_event(&captured);
-        assert_eq!(
-            tag_values(&event, "e"),
-            vec![vec!["e", ID_A, "", "reply"]]
-        );
+        assert_eq!(tag_values(&event, "e"), vec![vec!["e", ID_A, "", "reply"]]);
         assert_eq!(
             tag_values(&event, "buzz:github-action"),
             vec![vec!["buzz:github-action", "open-issue"]]

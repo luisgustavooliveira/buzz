@@ -573,7 +573,11 @@ pub enum GithubCmd {
         #[arg(long)]
         title: String,
         /// Issue body. Use '-' to read from stdin
-        #[arg(long, conflicts_with = "body_file", required_unless_present = "body_file")]
+        #[arg(
+            long,
+            conflicts_with = "body_file",
+            required_unless_present = "body_file"
+        )]
         body: Option<String>,
         /// Path to a file containing the issue body, or '-' to read from stdin
         #[arg(long, conflicts_with = "body", required_unless_present = "body")]
@@ -2305,17 +2309,17 @@ mod tests {
             "neither --content nor --event"
         );
         assert!(
-            Cli::try_parse_from(
-                base.into_iter()
-                    .chain(["--content", "x", "--event", event.as_str()])
-            )
+            Cli::try_parse_from(base.into_iter().chain([
+                "--content",
+                "x",
+                "--event",
+                event.as_str()
+            ]))
             .is_err(),
             "both --content and --event"
         );
         assert!(Cli::try_parse_from(base.into_iter().chain(["--content", "x"])).is_ok());
-        assert!(
-            Cli::try_parse_from(base.into_iter().chain(["--event", event.as_str()])).is_ok()
-        );
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--event", event.as_str()])).is_ok());
     }
 
     #[test]
@@ -2377,11 +2381,10 @@ mod tests {
         ];
 
         assert!(Cli::try_parse_from(base).is_err(), "no body source");
-        assert!(Cli::try_parse_from(
-            base.into_iter()
-                .chain(["--body", "b", "--body-file", "f"])
-        )
-        .is_err());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--body", "b", "--body-file", "f"]))
+                .is_err()
+        );
         assert!(Cli::try_parse_from(base.into_iter().chain(["--body", "b"])).is_ok());
         assert!(Cli::try_parse_from(base.into_iter().chain(["--body-file", "f"])).is_ok());
     }
