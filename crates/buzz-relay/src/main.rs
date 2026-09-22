@@ -827,6 +827,33 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("Admin outbox delivery worker started");
     }
 
+    // GitHub bridge (BUZZ_GITHUB_*). Opt-in and fail-closed: the webhook
+    // secret is read here, and an unreadable/empty secret aborts startup — a
+    // relay that advertised the webhook route without a signature secret
+    // would be strictly worse than one that never started. When disabled,
+    // nothing is set on AppState: the webhook route 404s and tagged kind:9
+    // events are rejected with an actionable message.
+    if let Some(github_config) = state.config.github.clone() {
+        let bridge = buzz_relay::github_bridge::BridgeState::load(&github_config)
+            .map_err(|e| anyhow::anyhow!("GitHub bridge disabled by failure: {e}"))?;
+        if state.github.set(bridge).is_err() {
+            return Err(anyhow::anyhow!(
+                "GitHub bridge state was already initialized (set exactly once)"
+            ));
+        }
+        let worker_state = Arc::clone(&state);
+        let worker_cancel = state.github_worker_cancel.clone();
+        tokio::spawn(async move {
+            buzz_relay::github_bridge::outbox_worker::run(worker_state, worker_cancel).await
+        });
+        info!(
+            repos = github_config.repos.len(),
+            "GitHub bridge enabled: webhook route active, outbox worker started"
+        );
+    } else {
+        info!("GitHub bridge disabled (BUZZ_GITHUB_ENABLED unset/false)");
+    }
+
     // Action recovery worker: re-drives stranded relay_admin_actions rows whose
     // action lease expired before the enforcement state machine completed.
     // Crash safety: a process that died between claim and finalization leaves
@@ -1216,6 +1243,9 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
 
     serve(router, health_router, Arc::clone(&state)).await?;
     state.community_revalidator_cancel.cancel();
+    // Stop the GitHub bridge outbox worker (its claimed rows' leases expire
+    // and another pod — or this pod after restart — reclaims them).
+    state.github_worker_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many

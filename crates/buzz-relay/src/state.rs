@@ -778,6 +778,18 @@ pub struct AppState {
     /// byte-identically to a relay without the mesh. Access via
     /// [`AppState::mesh`].
     pub mesh: Arc<std::sync::OnceLock<crate::mesh_boot::MeshHandle>>,
+
+    /// GitHub bridge runtime state (webhook secret + API client), set once by
+    /// `main.rs` after `AppState::new` — the same set-once pattern as
+    /// [`Self::mesh`], so `AppState::new` call sites are untouched. Loading is
+    /// fail-closed: an unreadable webhook secret aborts startup before this is
+    /// ever set. Unset ⇒ bridge disabled: the webhook route 404s, the ingest
+    /// hook rejects tagged events, and the outbox worker never starts.
+    pub github: Arc<std::sync::OnceLock<crate::github_bridge::BridgeState>>,
+
+    /// Stops the GitHub bridge outbox worker during graceful shutdown (same
+    /// pattern as [`Self::community_revalidator_cancel`]).
+    pub github_worker_cancel: CancellationToken,
 }
 
 impl AppState {
@@ -955,6 +967,8 @@ impl AppState {
             // `crates/buzz-test-client` once those land).
             tracer: Arc::new(crate::conformance::NoopTracer),
             mesh: Arc::new(std::sync::OnceLock::new()),
+            github: Arc::new(std::sync::OnceLock::new()),
+            github_worker_cancel: CancellationToken::new(),
         };
         (
             state,

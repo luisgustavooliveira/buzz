@@ -3144,6 +3144,17 @@ async fn ingest_event_inner(
         });
     }
 
+    // GitHub bridge atomic ingest hook: a kind:9 event carrying
+    // `buzz:github-publish` / `buzz:github-action` tags must commit its
+    // `github_outbox` row in the SAME transaction as the event (one action =
+    // one atomic persist). The hook validates and returns the outbox plan;
+    // only the insert below branches on it.
+    let github_outbox = if kind_u32 == KIND_STREAM_MESSAGE {
+        crate::github_bridge::try_ingest_hook(tenant, state, &event, thread_meta.as_ref()).await?
+    } else {
+        None
+    };
+
     let (stored_event, was_inserted) = if buzz_core::kind::is_replaceable(kind_u32) {
         // NIP-16 replaceable event — atomic replace with stale-write protection.
         // channel_id is None for global kinds (0, 1, 3) due to step 5b above.
@@ -3169,16 +3180,32 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
-        match state
-            .db
-            .insert_event_with_thread_metadata(
-                tenant.community(),
-                &event,
-                channel_id,
-                thread_params,
-            )
-            .await
-        {
+        let insert_result = match github_outbox {
+            Some(plan) => {
+                state
+                    .db
+                    .insert_event_with_github_outbox(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                        plan.as_insert(tenant.community(), &event),
+                    )
+                    .await
+            }
+            None => {
+                state
+                    .db
+                    .insert_event_with_thread_metadata(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                    )
+                    .await
+            }
+        };
+        match insert_result {
             Ok(result) => result,
             Err(e) => {
                 // Compensate: if we pre-created a channel for kind:9007,

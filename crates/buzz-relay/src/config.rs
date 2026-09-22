@@ -109,6 +109,54 @@ impl std::fmt::Debug for KlipyConfig {
     }
 }
 
+/// Optional GitHub bridge integration owned by the relay operator.
+///
+/// Config-gated and inert when [`Option::None`]: the webhook route returns 404
+/// and the outbound worker never starts. Secrets stay in operator-managed files
+/// (paths, not values) so they can be mounted from a secret store and never
+/// appear in environment listings or `Config` value dumps.
+#[derive(Debug, Clone)]
+pub struct GitHubConfig {
+    /// GitHub App numeric id.
+    pub app_id: u64,
+    /// GitHub App slug — the bot identity used for webhook echo suppression
+    /// (`<slug>[bot]` login form).
+    pub app_slug: String,
+    /// Path to the GitHub App private key (PEM), read lazily for token minting.
+    pub private_key_path: std::path::PathBuf,
+    /// Path to the GitHub App webhook secret, read at startup for HMAC checks.
+    pub webhook_secret_path: std::path::PathBuf,
+    /// GitHub REST API base URL. Defaults to `https://api.github.com`;
+    /// overridable only so integration tests can point at a local mock.
+    pub api_base_url: String,
+    /// Per-repository routing table. Webhooks and outbound actions are
+    /// restricted to these entries (allowlist).
+    pub repos: Vec<GitHubRepoRoute>,
+}
+
+/// One allowlisted repository in the GitHub bridge routing table.
+#[derive(Debug, Clone)]
+pub struct GitHubRepoRoute {
+    /// Full repository name in `owner/repo` form.
+    pub name: String,
+    /// Channel that receives threads for this repository's issues.
+    pub channel_id: uuid::Uuid,
+    /// Default agent (64-char hex pubkey) mentioned on new issue threads and
+    /// used as the inbound routing fallback before the first outbound publish.
+    pub default_agent_pubkey: String,
+    /// Owner authority (64-char hex pubkey) the bridge acts for — must be the
+    /// registered owner of the routed agents so relay-delegated mentions pass
+    /// the buzz-acp inbound author gate.
+    pub owner_pubkey: String,
+}
+
+impl GitHubConfig {
+    /// Look up the routing entry for a full repository name.
+    pub fn route_for(&self, repo_full_name: &str) -> Option<&GitHubRepoRoute> {
+        self.repos.iter().find(|route| route.name == repo_full_name)
+    }
+}
+
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
@@ -289,6 +337,10 @@ pub struct Config {
     /// Relay-owned KLIPY integration. Unset means GIF search is not advertised
     /// and its proxy routes return 404.
     pub klipy: Option<KlipyConfig>,
+
+    /// Optional GitHub bridge (`BUZZ_GITHUB_*`). Unset means the webhook route
+    /// 404s, no GitHub API client exists, and the outbox worker never starts.
+    pub github: Option<GitHubConfig>,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -536,6 +588,159 @@ fn inert_env_vars<'a>(names: &[&'a str], lookup: impl Fn(&str) -> Option<String>
         .collect()
 }
 
+/// Parse the `BUZZ_GITHUB_*` env surface into an optional [`GitHubConfig`].
+///
+/// The bridge is fully opt-in: with no `BUZZ_GITHUB_ENABLED` set (or set to a
+/// false value), the function returns `None` and every remaining variable is
+/// ignored — an upgrade with untouched env is a strict no-op. Once enabled,
+/// every required field is fail-closed: a malformed value is a startup error,
+/// never a silently dropped route or half-configured bridge.
+fn parse_github_config(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<GitHubConfig>, ConfigError> {
+    let enabled = lookup("BUZZ_GITHUB_ENABLED")
+        .map(|v| v == "true" || v == "1" || v.eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+
+    let app_id = lookup("BUZZ_GITHUB_APP_ID")
+        .ok_or_else(|| {
+            ConfigError::InvalidValue("BUZZ_GITHUB_ENABLED requires BUZZ_GITHUB_APP_ID".into())
+        })?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| {
+            ConfigError::InvalidValue(
+                "BUZZ_GITHUB_APP_ID must be the GitHub App's numeric id".into(),
+            )
+        })?;
+
+    let app_slug = lookup("BUZZ_GITHUB_APP_SLUG")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ConfigError::InvalidValue("BUZZ_GITHUB_ENABLED requires BUZZ_GITHUB_APP_SLUG".into())
+        })?;
+
+    let private_key_path = lookup("BUZZ_GITHUB_PRIVATE_KEY_PATH")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            ConfigError::InvalidValue(
+                "BUZZ_GITHUB_ENABLED requires BUZZ_GITHUB_PRIVATE_KEY_PATH".into(),
+            )
+        })?;
+
+    let webhook_secret_path = lookup("BUZZ_GITHUB_WEBHOOK_SECRET_PATH")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(std::path::PathBuf::from)
+        .ok_or_else(|| {
+            ConfigError::InvalidValue(
+                "BUZZ_GITHUB_ENABLED requires BUZZ_GITHUB_WEBHOOK_SECRET_PATH".into(),
+            )
+        })?;
+
+    let api_base_url = lookup("BUZZ_GITHUB_API_BASE_URL")
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "https://api.github.com".to_string());
+
+    // The routing table is a JSON array so one env var carries the full
+    // repo → (channel, agent, owner) mapping without inventing a DSL.
+    let repos_raw = lookup("BUZZ_GITHUB_REPOS").ok_or_else(|| {
+        ConfigError::InvalidValue(
+            "BUZZ_GITHUB_ENABLED requires BUZZ_GITHUB_REPOS (JSON array of routes)".into(),
+        )
+    })?;
+
+    #[derive(serde::Deserialize)]
+    struct RawRoute {
+        name: String,
+        channel_id: String,
+        default_agent_pubkey: String,
+        owner_pubkey: String,
+    }
+
+    let raw_routes: Vec<RawRoute> = serde_json::from_str(&repos_raw).map_err(|e| {
+        ConfigError::InvalidValue(format!("BUZZ_GITHUB_REPOS is not valid JSON: {e}"))
+    })?;
+
+    let is_valid_pubkey =
+        |value: &str| value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit());
+    let is_valid_repo_name = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 140
+            && value.split_once('/').is_some_and(|(owner, repo)| {
+                !owner.is_empty()
+                    && !repo.is_empty()
+                    && !repo.contains('/')
+                    && owner
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+                    && repo
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+            })
+    };
+
+    let mut repos = Vec::with_capacity(raw_routes.len());
+    let mut seen_names = std::collections::HashSet::new();
+    for route in &raw_routes {
+        let name = route.name.trim().to_string();
+        if !is_valid_repo_name(&name) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_GITHUB_REPOS entry {name:?} is not a valid owner/repo name"
+            )));
+        }
+        if !seen_names.insert(name.clone()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_GITHUB_REPOS lists {name:?} twice"
+            )));
+        }
+        let channel_id = route.channel_id.trim().parse::<uuid::Uuid>().map_err(|_| {
+            ConfigError::InvalidValue(format!(
+                "BUZZ_GITHUB_REPOS entry {name:?}: channel_id is not a UUID"
+            ))
+        })?;
+        let default_agent_pubkey = route.default_agent_pubkey.trim().to_lowercase();
+        if !is_valid_pubkey(&default_agent_pubkey) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_GITHUB_REPOS entry {name:?}: default_agent_pubkey is not 64-char hex"
+            )));
+        }
+        let owner_pubkey = route.owner_pubkey.trim().to_lowercase();
+        if !is_valid_pubkey(&owner_pubkey) {
+            return Err(ConfigError::InvalidValue(format!(
+                "BUZZ_GITHUB_REPOS entry {name:?}: owner_pubkey is not 64-char hex"
+            )));
+        }
+        repos.push(GitHubRepoRoute {
+            name,
+            channel_id,
+            default_agent_pubkey,
+            owner_pubkey,
+        });
+    }
+    if repos.is_empty() {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_GITHUB_REPOS must list at least one repository route".into(),
+        ));
+    }
+
+    Ok(Some(GitHubConfig {
+        app_id,
+        app_slug,
+        private_key_path,
+        webhook_secret_path,
+        api_base_url,
+        repos,
+    }))
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -713,6 +918,8 @@ impl Config {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
             .map(|api_key| KlipyConfig { api_key });
+
+        let github = parse_github_config(|name| std::env::var(name).ok())?;
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1234,6 +1441,7 @@ impl Config {
             relay_operator_pubkeys,
             allow_nip_oa_auth,
             klipy,
+            github,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -1274,6 +1482,94 @@ mod tests {
         let debug = format!("{config:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("private-klipy-key"));
+    }
+
+    #[test]
+    fn github_config_disabled_by_default_ignores_partial_vars() {
+        let parsed = parse_github_config(|name| match name {
+            "BUZZ_GITHUB_APP_SLUG" => Some("snps-buzz-bridge".into()),
+            _ => None,
+        })
+        .expect("parse");
+        assert!(
+            parsed.is_none(),
+            "absent enable flag must disable the bridge"
+        );
+    }
+
+    #[test]
+    fn github_config_enabled_requires_all_fields_and_parses_routes() {
+        let agent = "a".repeat(64);
+        let owner = "b".repeat(64);
+        let routes = format!(
+            r#"[{{"name":"SnpsGroup/QuantaPki","channel_id":"fb900995-8928-4599-b913-942b9bc41b0c","default_agent_pubkey":"{agent}","owner_pubkey":"{owner}"}}]"#
+        );
+        let parsed = parse_github_config(|name| match name {
+            "BUZZ_GITHUB_ENABLED" => Some("true".into()),
+            "BUZZ_GITHUB_APP_ID" => Some("123456".into()),
+            "BUZZ_GITHUB_APP_SLUG" => Some("snps-buzz-bridge".into()),
+            "BUZZ_GITHUB_PRIVATE_KEY_PATH" => Some("/run/secrets/app.pem".into()),
+            "BUZZ_GITHUB_WEBHOOK_SECRET_PATH" => Some("/run/secrets/hook.secret".into()),
+            "BUZZ_GITHUB_REPOS" => Some(routes.clone()),
+            _ => None,
+        })
+        .expect("parse")
+        .expect("enabled");
+        assert_eq!(parsed.app_id, 123456);
+        assert_eq!(parsed.api_base_url, "https://api.github.com");
+        assert_eq!(parsed.repos.len(), 1);
+        assert!(parsed.route_for("SnpsGroup/QuantaPki").is_some());
+        assert!(parsed.route_for("SnpsGroup/Other").is_none());
+    }
+
+    #[test]
+    fn github_config_fail_closed_on_missing_and_malformed_vars() {
+        let agent = "a".repeat(64);
+        let owner = "b".repeat(64);
+        let route = format!(
+            r#"{{"name":"o/r","channel_id":"fb900995-8928-4599-b913-942b9bc41b0c","default_agent_pubkey":"{agent}","owner_pubkey":"{owner}"}}"#
+        );
+        let full = |repos: String| {
+            move |name: &str| match name {
+                "BUZZ_GITHUB_ENABLED" => Some("true".into()),
+                "BUZZ_GITHUB_APP_ID" => Some("123456".into()),
+                "BUZZ_GITHUB_APP_SLUG" => Some("snps-buzz-bridge".into()),
+                "BUZZ_GITHUB_PRIVATE_KEY_PATH" => Some("/run/secrets/app.pem".into()),
+                "BUZZ_GITHUB_WEBHOOK_SECRET_PATH" => Some("/run/secrets/hook.secret".into()),
+                "BUZZ_GITHUB_REPOS" => Some(repos.clone()),
+                _ => None,
+            }
+        };
+
+        let only_enabled = |name: &str| match name {
+            "BUZZ_GITHUB_ENABLED" => Some("true".into()),
+            _ => None,
+        };
+        assert!(parse_github_config(only_enabled).is_err(), "missing fields");
+
+        let bad_id = |name: &str| match name {
+            "BUZZ_GITHUB_ENABLED" => Some("true".into()),
+            "BUZZ_GITHUB_APP_ID" => Some("snps".into()),
+            _ => None,
+        };
+        assert!(parse_github_config(bad_id).is_err(), "non-numeric app id");
+
+        assert!(
+            parse_github_config(full(route.replace(&agent, "xyz"))).is_err(),
+            "bad agent pubkey"
+        );
+        assert!(
+            parse_github_config(full(route.replace("\"o/r\"", "\"no-slash\""))).is_err(),
+            "malformed repo name"
+        );
+        assert!(
+            parse_github_config(full("[]".into())).is_err(),
+            "empty routes"
+        );
+        assert!(
+            parse_github_config(full(format!("[{route},{route}]"))).is_err(),
+            "duplicate repo"
+        );
     }
 
     // Mutex to serialize tests that mutate environment variables.
