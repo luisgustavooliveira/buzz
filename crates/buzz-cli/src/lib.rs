@@ -195,6 +195,9 @@ enum Cmd {
     /// Search and share GIFs via the relay's KLIPY proxy
     #[command(subcommand)]
     Gifs(GifsCmd),
+    /// Publish messages to GitHub via the relay's optional GitHub bridge
+    #[command(subcommand)]
+    Github(GithubCmd),
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
@@ -530,6 +533,63 @@ pub enum MessagesCmd {
         /// Vote direction: "up" or "down"
         #[arg(long)]
         direction: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GithubCmd {
+    /// Publish a thread message to GitHub as a comment
+    #[command(
+        after_help = "Examples:\n  buzz github publish --channel <UUID> --reply-to <EVENT_ID> --content 'Ship it'\n  buzz github publish --channel <UUID> --reply-to <EVENT_ID> --event <SOURCE_EVENT_ID>\n  buzz github publish --link 'buzz://message?channel=<UUID>&id=<EVENT_ID>' --content 'Ship it'"
+    )]
+    Publish {
+        /// Channel UUID; required unless --link is supplied
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        channel: Option<String>,
+        /// Thread message event ID to reply to (64-char hex); required unless
+        /// --link is supplied (then the linked message is the reply target)
+        #[arg(long, required_unless_present = "link", conflicts_with = "link")]
+        reply_to: Option<String>,
+        /// Canonical buzz://message deep link; uses the configured relay and identity
+        #[arg(long, conflicts_with_all = ["channel", "reply_to"])]
+        link: Option<String>,
+        /// New message content — becomes the GitHub comment body. Use '-' to read from stdin
+        #[arg(long, conflicts_with = "event", required_unless_present = "event")]
+        content: Option<String>,
+        /// Existing thread message event ID (64-char hex) to publish instead of new content
+        #[arg(long, conflicts_with = "content", required_unless_present = "content")]
+        event: Option<String>,
+    },
+    /// Ask the relay's GitHub bridge to open a GitHub issue
+    #[command(
+        name = "open-issue",
+        after_help = "Examples:\n  buzz github open-issue --repo org/repo --title 'Crash on startup' --body 'Steps to reproduce' --channel <UUID>\n  buzz github open-issue --repo org/repo --title 'Bug' --body-file issue.md --label bug --assignee octocat --channel <UUID> --reply-to <EVENT_ID>"
+    )]
+    OpenIssue {
+        /// GitHub repository as <owner>/<repo>
+        #[arg(long)]
+        repo: String,
+        /// Issue title (1-256 characters)
+        #[arg(long)]
+        title: String,
+        /// Issue body. Use '-' to read from stdin
+        #[arg(long, conflicts_with = "body_file", required_unless_present = "body_file")]
+        body: Option<String>,
+        /// Path to a file containing the issue body, or '-' to read from stdin
+        #[arg(long, conflicts_with = "body", required_unless_present = "body")]
+        body_file: Option<String>,
+        /// GitHub login to assign the issue to
+        #[arg(long)]
+        assignee: Option<String>,
+        /// Label to apply — can be specified multiple times
+        #[arg(long = "label")]
+        labels: Vec<String>,
+        /// Channel UUID to post the request message in
+        #[arg(long)]
+        channel: String,
+        /// Thread message event ID to reply under (64-char hex); omit for a top-level message
+        #[arg(long)]
+        reply_to: Option<String>,
     },
 }
 
@@ -2109,6 +2169,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Reactions(sub) => commands::reactions::dispatch(sub, &client).await,
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
+        Cmd::Github(sub) => commands::github::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
@@ -2226,6 +2287,106 @@ mod tests {
     }
 
     #[test]
+    fn github_publish_requires_exactly_one_of_content_or_event() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let base = [
+            "buzz",
+            "github",
+            "publish",
+            "--channel",
+            channel,
+            "--reply-to",
+            event.as_str(),
+        ];
+
+        assert!(
+            Cli::try_parse_from(base).is_err(),
+            "neither --content nor --event"
+        );
+        assert!(
+            Cli::try_parse_from(
+                base.into_iter()
+                    .chain(["--content", "x", "--event", event.as_str()])
+            )
+            .is_err(),
+            "both --content and --event"
+        );
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--content", "x"])).is_ok());
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--event", event.as_str()])).is_ok()
+        );
+    }
+
+    #[test]
+    fn github_publish_accepts_link_or_explicit_target() {
+        let channel = "123e4567-e89b-12d3-a456-426614174000";
+        let event = "a".repeat(64);
+        let link = format!("buzz://message?channel={channel}&id={event}");
+
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "github",
+            "publish",
+            "--link",
+            link.as_str(),
+            "--content",
+            "x",
+        ])
+        .is_ok());
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "github",
+            "publish",
+            "--link",
+            link.as_str(),
+            "--channel",
+            channel,
+            "--content",
+            "x",
+        ])
+        .is_err());
+        assert!(
+            Cli::try_parse_from(["buzz", "github", "publish", "--content", "x"]).is_err(),
+            "publish requires a thread target"
+        );
+        assert!(Cli::try_parse_from([
+            "buzz",
+            "github",
+            "publish",
+            "--channel",
+            channel,
+            "--content",
+            "x",
+        ])
+        .is_err());
+    }
+
+    #[test]
+    fn github_open_issue_requires_exactly_one_body_source() {
+        let base = [
+            "buzz",
+            "github",
+            "open-issue",
+            "--repo",
+            "org/repo",
+            "--title",
+            "t",
+            "--channel",
+            "123e4567-e89b-12d3-a456-426614174000",
+        ];
+
+        assert!(Cli::try_parse_from(base).is_err(), "no body source");
+        assert!(Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--body", "b", "--body-file", "f"])
+        )
+        .is_err());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--body", "b"])).is_ok());
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--body-file", "f"])).is_ok());
+    }
+
+    #[test]
     fn set_status_clear_rejects_text_and_emoji() {
         for extra in [["--text", "busy"], ["--emoji", "🎶"]] {
             let args = ["buzz", "users", "set-status", "--clear"]
@@ -2259,6 +2420,7 @@ mod tests {
             "emoji",
             "feed",
             "gifs",
+            "github",
             "issues",
             "media",
             "mem",
@@ -2385,6 +2547,7 @@ mod tests {
             vec!["approve", "create", "delete", "get", "list", "runs", "trigger", "update"]
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
+        assert_eq!(names(&cmd, "github"), vec!["open-issue", "publish"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2468,6 +2631,7 @@ mod tests {
             ("dms", 4),
             ("emoji", 5),
             ("feed", 1),
+            ("github", 2),
             ("issues", 6),
             ("media", 1),
             ("messages", 8),
