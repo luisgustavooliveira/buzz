@@ -1215,6 +1215,59 @@ INSERT INTO replica_heartbeat (id) VALUES (1);
 INSERT INTO _operator_global_tables (table_name, reason) VALUES
     ('replica_heartbeat', 'single-row replication freshness token; describes deployment topology, never tenant data');
 
+-- ── GitHub bridge (migration 0045) ───────────────────────────────────────────
+-- Optional, config-gated GitHub integration: maps a GitHub (repo, subject) pair
+-- to one Buzz thread per community, and durably queues outbound GitHub API
+-- actions. Tenant-scoped: the write-fence sweep below attaches the universal
+-- community fence to both tables (no explicit attach calls here — the explicit
+-- list is pinned to migration 0029's target set by the deletion-surface parity
+-- test).
+
+CREATE TABLE github_thread_links (
+    community_id      UUID NOT NULL REFERENCES communities(id),
+    repo_full_name    TEXT NOT NULL,
+    subject_type      TEXT NOT NULL DEFAULT 'issue'
+                      CHECK (subject_type IN ('issue', 'pr')),
+    subject_number    INTEGER NOT NULL CHECK (subject_number > 0),
+    channel_id        UUID NOT NULL,
+    root_event_id     BYTEA NOT NULL CHECK (length(root_event_id) = 32),
+    last_agent_pubkey BYTEA CHECK (last_agent_pubkey IS NULL OR length(last_agent_pubkey) = 32),
+    status            TEXT NOT NULL DEFAULT 'open'
+                      CHECK (status IN ('open', 'closed')),
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, repo_full_name, subject_type, subject_number),
+    FOREIGN KEY (community_id, channel_id)
+        REFERENCES channels (community_id, id)
+);
+
+CREATE TABLE github_outbox (
+    id                UUID NOT NULL DEFAULT gen_random_uuid(),
+    community_id      UUID NOT NULL REFERENCES communities(id),
+    action            TEXT NOT NULL CHECK (action IN ('comment', 'open_issue')),
+    link_repo         TEXT NOT NULL,
+    link_number       INTEGER CHECK (link_number IS NULL OR link_number > 0),
+    event_id          BYTEA NOT NULL CHECK (length(event_id) = 32),
+    author_pubkey     BYTEA NOT NULL CHECK (length(author_pubkey) = 32),
+    payload           JSONB NOT NULL DEFAULT '{}'::jsonb,
+    status            TEXT NOT NULL DEFAULT 'pending'
+                      CHECK (status IN ('pending', 'sent', 'failed')),
+    attempts          INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+    next_retry_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_error        TEXT,
+    github_comment_id BIGINT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (community_id, id)
+);
+
+CREATE INDEX idx_github_outbox_pending
+    ON github_outbox (next_retry_at, created_at)
+    WHERE status = 'pending';
+
+CREATE UNIQUE INDEX idx_github_outbox_comment_id
+    ON github_outbox (community_id, github_comment_id)
+    WHERE github_comment_id IS NOT NULL;
+
 -- ── Whole-community deletion control plane (migration 0029) ─────────────────
 CREATE TABLE community_deletion_requests (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),

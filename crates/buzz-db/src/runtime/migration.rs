@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 44);
+        assert_eq!(migrations.len(), 45);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1287,6 +1287,15 @@ mod postgres_tests {
             desired_schema.contains("'rate_limit_violations'\n    ]::TEXT[])"),
             "schema.sql exclusion list must match the pre-0041 body after ledger removal"
         );
+
+        // GitHub bridge (0045): config-gated persistence for the issue↔thread
+        // mapping and the durable outbound-action outbox. Purely additive.
+        assert_eq!(migrations[44].version, 45);
+        let github_bridge = migrations[44].sql.as_str();
+        assert!(github_bridge.contains("CREATE TABLE github_thread_links"));
+        assert!(github_bridge.contains("CREATE TABLE github_outbox"));
+        assert!(github_bridge.contains("attach_community_write_fence('github_thread_links')"));
+        assert!(github_bridge.contains("attach_community_write_fence('github_outbox')"));
     }
 
     #[test]
