@@ -147,14 +147,23 @@ Controls which authors' events the harness forwards to the agent. Events from di
 | `anyone` | Forward all events (no author filtering). |
 | `nobody` | Drop all inbound events. Agent only acts on heartbeat prompts. |
 
-Relay-signed workflow messages delegate to their recorded owner only when they
-explicitly target this agent with authenticated workflow-mention provenance.
-The owner tag means that owner scheduled the workflow; it does not claim that
-the owner authored every word after template rendering. ACP verifies the
-provenance against the relay's NIP-11 `self` key, then evaluates the owner under
-the same author policy as ordinary messages. Legacy workflow messages and
-workflow output without an explicit agent mention remain attributed to the relay
-signer. `nobody` remains absolute.
+Relay-signed workflow and bridge messages delegate to their recorded owner only
+when they explicitly target this agent with authenticated mention provenance.
+Two delegation families share identical verification strictness:
+
+- **Workflow:** `["buzz:workflow", "true"]` marker, `["buzz:workflow-owner", <hex>]`, `["buzz:workflow-mention", <hex>]`.
+- **GitHub bridge:** `["buzz:bridge", "github"]` marker, `["buzz:bridge-owner", <hex>]`, `["buzz:bridge-mention", <hex>]`.
+
+The owner tag means that owner scheduled the workflow or triggered the bridge
+message; it does not claim that the owner authored every word after template
+rendering. ACP verifies the provenance against the relay's NIP-11 `self` key —
+a cryptographically valid kind:9 event with exactly one canonical marker tag,
+exactly one canonical-hex owner tag, the agent's pubkey in the deduplicated
+canonical mention tags, and no tags from any other delegation family — then
+evaluates the owner under the same author policy as ordinary messages. An event
+mixing families fails closed. Legacy workflow messages and delegated output
+without an explicit agent mention remain attributed to the relay signer.
+`nobody` remains absolute.
 
 The gate applies to **all** inbound events — @mentions, DMs, thread replies, and any event delivered by the relay. Owner control commands are checked **before** the gate, so the owner can still manage the harness regardless of mode:
 

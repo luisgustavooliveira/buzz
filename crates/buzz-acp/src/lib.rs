@@ -234,16 +234,49 @@ async fn is_owner_or_sibling(
     is_sibling
 }
 
-/// Return the workflow owner attributed by a relay-signed workflow message.
+/// Tag contract for one relay-signed delegation family.
 ///
-/// `buzz:workflow-owner` alone is not authority: any ordinary event author can
-/// forge custom tags. Attribution is accepted only for a cryptographically
-/// valid kind:9 event signed by the active relay's NIP-11 `self` key, with
-/// exactly one canonical workflow marker and owner pubkey. The current agent
-/// must also have exactly one canonical `buzz:workflow-mention` tag; legacy `p`
-/// tags are deliberately ignored as author-gate authority because workflows
-/// retain an owner `p` tag for mentions-feed compatibility.
-fn verified_workflow_owner(
+/// A family delegates author attribution from the relay signer to a recorded
+/// owner: `marker` is the canonical marker tag, `owner_tag` names the tag
+/// carrying the delegating owner's hex pubkey, and `mention_tag` names the
+/// tags carrying the explicit target agents' hex pubkeys.
+struct DelegationFamily {
+    marker: [&'static str; 2],
+    owner_tag: &'static str,
+    mention_tag: &'static str,
+}
+
+/// Delegation families accepted by the inbound author gate.
+///
+/// Workflow messages and GitHub bridge messages share identical verification
+/// strictness; they differ only in tag names. An event must use exactly one
+/// family — tags from two families on the same event fail closed.
+const DELEGATION_FAMILIES: &[DelegationFamily] = &[
+    DelegationFamily {
+        marker: ["buzz:workflow", "true"],
+        owner_tag: "buzz:workflow-owner",
+        mention_tag: "buzz:workflow-mention",
+    },
+    DelegationFamily {
+        marker: ["buzz:bridge", "github"],
+        owner_tag: "buzz:bridge-owner",
+        mention_tag: "buzz:bridge-mention",
+    },
+];
+
+/// Return the owner delegated by a relay-signed workflow or bridge message.
+///
+/// `buzz:workflow-owner` / `buzz:bridge-owner` alone is not authority: any
+/// ordinary event author can forge custom tags. Attribution is accepted only
+/// for a cryptographically valid kind:9 event signed by the active relay's
+/// NIP-11 `self` key, using exactly one delegation family with exactly one
+/// canonical marker and one canonical-hex owner pubkey, and carrying no tags
+/// from any other family. The current agent must also appear in the
+/// deduplicated set of canonical `buzz:workflow-mention` /
+/// `buzz:bridge-mention` tags; legacy `p` tags are deliberately ignored as
+/// author-gate authority because delegated messages retain an owner `p` tag
+/// for mentions-feed compatibility.
+fn verified_relay_delegation(
     event: &nostr::Event,
     relay_self: Option<&str>,
     agent_pubkey_hex: &str,
@@ -257,13 +290,33 @@ fn verified_workflow_owner(
         return None;
     }
 
+    // Select the single delegation family this event uses. A family counts as
+    // used when any of its marker, owner, or mention tag names appear; tags
+    // from two families on one event leave no unambiguous delegation contract
+    // to verify against, so they fail closed.
+    let mut used_families = DELEGATION_FAMILIES.iter().filter(|family| {
+        event.tags.iter().any(|tag| {
+            matches!(
+                tag.as_slice().first().map(String::as_str),
+                Some(name)
+                    if name == family.marker[0]
+                        || name == family.owner_tag
+                        || name == family.mention_tag
+            )
+        })
+    });
+    let family = used_families.next()?;
+    if used_families.next().is_some() {
+        return None;
+    }
+
     let markers: Vec<&[String]> = event
         .tags
         .iter()
         .map(|tag| tag.as_slice())
-        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow"))
+        .filter(|values| values.first().map(String::as_str) == Some(family.marker[0]))
         .collect();
-    if markers.as_slice() != [["buzz:workflow", "true"]] {
+    if markers.as_slice() != [family.marker] {
         return None;
     }
 
@@ -271,7 +324,7 @@ fn verified_workflow_owner(
         .tags
         .iter()
         .map(|tag| tag.as_slice())
-        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow-owner"))
+        .filter(|values| values.first().map(String::as_str) == Some(family.owner_tag))
         .collect();
     let [owner_tag] = owners.as_slice() else {
         return None;
@@ -285,14 +338,14 @@ fn verified_workflow_owner(
     }
 
     let agent_pubkey = nostr::PublicKey::from_hex(agent_pubkey_hex).ok()?.to_hex();
-    let workflow_mentions: Vec<&[String]> = event
+    let mentions: Vec<&[String]> = event
         .tags
         .iter()
         .map(|tag| tag.as_slice())
-        .filter(|values| values.first().map(String::as_str) == Some("buzz:workflow-mention"))
+        .filter(|values| values.first().map(String::as_str) == Some(family.mention_tag))
         .collect();
-    let mut mentioned_pubkeys = HashSet::with_capacity(workflow_mentions.len());
-    for mention_tag in workflow_mentions {
+    let mut mentioned_pubkeys = HashSet::with_capacity(mentions.len());
+    for mention_tag in mentions {
         let [_, mention_value] = mention_tag else {
             return None;
         };
@@ -314,7 +367,7 @@ fn effective_prompt_author(
     relay_self: Option<&str>,
     agent_pubkey_hex: &str,
 ) -> String {
-    verified_workflow_owner(event, relay_self, agent_pubkey_hex)
+    verified_relay_delegation(event, relay_self, agent_pubkey_hex)
         .unwrap_or_else(|| event.pubkey.to_hex())
 }
 
@@ -330,7 +383,7 @@ fn effective_prompt_author(
 /// threaded a local `Option<String>` into every gate call, and the second kept
 /// a free `evaluate_inbound_author_gate(.., relay_self, ..)` alongside the
 /// method. In both cases a listener could be rewired to pass `None` — silently
-/// disabling every delegated workflow wake — while all 848 tests stayed green.
+/// disabling every delegated workflow/bridge wake — while all 848 tests stayed green.
 /// Encapsulation, not a test, is what closes that seam: `InboundAuthorGate {
 /// relay_self: None, .. }` is now a privacy error outside this module, and
 /// dropping the load inside it fails the construction regressions.
@@ -365,10 +418,10 @@ mod inbound_author_gate {
         }
     }
 
-    /// Apply the configured raw-author policy after trusted workflow attribution.
+    /// Apply the configured raw-author policy after trusted delegated attribution.
     ///
     /// This stays private to the gate module so neither listener can bypass
-    /// workflow attribution by calling the raw-signer policy directly.
+    /// delegated attribution by calling the raw-signer policy directly.
     async fn author_allowed(
         respond_to: &RespondTo,
         allowlist: &HashSet<String>,
@@ -440,7 +493,7 @@ mod inbound_author_gate {
             }
         }
 
-        /// Whether delegated workflow attribution is currently available.
+        /// Whether relay-delegated (workflow/bridge) attribution is currently available.
         ///
         /// Test-only: production code never branches on this.
         /// `refresh_relay_self` already logs why attribution is unavailable, and
@@ -457,7 +510,7 @@ mod inbound_author_gate {
         }
 
         /// Refresh relay identity, resolve channel trust, and apply trusted
-        /// workflow attribution and author policy for one listener event.
+        /// workflow/bridge attribution and author policy for one listener event.
         ///
         /// Both production listeners call this exact boundary. Identity refresh
         /// cannot be omitted independently of authorization; the raw-author
@@ -720,9 +773,9 @@ async fn authorize_normal_listener_event(
         .await
 }
 
-/// Refresh the relay signing identity, logging why delegated workflow
+/// Refresh the relay signing identity, logging why delegated (workflow/bridge)
 /// attribution is unavailable. A transient fetch error keeps the last verified
-/// key so a reconnect blip cannot disable workflow wakes. That availability
+/// key so a reconnect blip cannot disable delegated wakes. That availability
 /// tradeoff creates a bounded-by-success revocation window: a rotated-away key
 /// remains trusted while NIP-11 refreshes keep failing, then is replaced or
 /// cleared by the next successful response. Refresh runs at startup and before
@@ -6208,22 +6261,26 @@ mod workflow_owner_tests {
     use super::*;
     use nostr::{EventBuilder, Keys, Kind, Tag};
 
-    fn workflow_event(
+    /// Build a relay-delegation event with arbitrary marker/mention tag
+    /// payloads so tests can probe every fail-closed guard. `owner_tag` names
+    /// the owner tag of the family under test.
+    fn delegation_event(
         signer: &Keys,
+        owner_tag: &str,
         owner: Option<&str>,
         marker_tags: &[&[&str]],
-        workflow_mentions: &[&[&str]],
+        mention_tags: &[&[&str]],
         p_tags: &[&str],
     ) -> nostr::Event {
         let mut tags = Vec::new();
         for marker in marker_tags {
-            tags.push(Tag::parse(marker.iter().copied()).expect("workflow marker"));
+            tags.push(Tag::parse(marker.iter().copied()).expect("delegation marker"));
         }
         if let Some(owner) = owner {
-            tags.push(Tag::parse(["buzz:workflow-owner", owner]).expect("workflow owner tag"));
+            tags.push(Tag::parse([owner_tag, owner]).expect("delegation owner tag"));
         }
-        for mention in workflow_mentions {
-            tags.push(Tag::parse(mention.iter().copied()).expect("workflow mention tag"));
+        for mention in mention_tags {
+            tags.push(Tag::parse(mention.iter().copied()).expect("delegation mention tag"));
         }
         for recipient in p_tags {
             tags.push(Tag::parse(["p", *recipient]).expect("p tag"));
@@ -6232,6 +6289,40 @@ mod workflow_owner_tests {
             .tags(tags)
             .sign_with_keys(signer)
             .expect("signed event")
+    }
+
+    fn workflow_event(
+        signer: &Keys,
+        owner: Option<&str>,
+        marker_tags: &[&[&str]],
+        workflow_mentions: &[&[&str]],
+        p_tags: &[&str],
+    ) -> nostr::Event {
+        delegation_event(
+            signer,
+            "buzz:workflow-owner",
+            owner,
+            marker_tags,
+            workflow_mentions,
+            p_tags,
+        )
+    }
+
+    fn bridge_event(
+        signer: &Keys,
+        owner: Option<&str>,
+        marker_tags: &[&[&str]],
+        bridge_mentions: &[&[&str]],
+        p_tags: &[&str],
+    ) -> nostr::Event {
+        delegation_event(
+            signer,
+            "buzz:bridge-owner",
+            owner,
+            marker_tags,
+            bridge_mentions,
+            p_tags,
+        )
     }
 
     #[tokio::test]
@@ -6382,6 +6473,229 @@ mod workflow_owner_tests {
             effective_prompt_author(&tampered, Some(&relay.public_key().to_hex()), &agent),
             relay.public_key().to_hex()
         );
+    }
+
+    #[test]
+    fn trusted_relay_bridge_uses_owner_for_explicit_target() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = bridge_event(
+            &relay,
+            Some(&owner),
+            &[&["buzz:bridge", "github"]],
+            &[&["buzz:bridge-mention", agent.as_str()]],
+            &[owner.as_str(), agent.as_str()],
+        );
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex()), &agent),
+            owner
+        );
+    }
+
+    #[test]
+    fn multiple_bridge_targets_each_use_owner() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent_a = Keys::generate().public_key().to_hex();
+        let agent_b = Keys::generate().public_key().to_hex();
+        let event = bridge_event(
+            &relay,
+            Some(&owner),
+            &[&["buzz:bridge", "github"]],
+            &[
+                &["buzz:bridge-mention", agent_a.as_str()],
+                &["buzz:bridge-mention", agent_b.as_str()],
+            ],
+            &[owner.as_str(), agent_a.as_str(), agent_b.as_str()],
+        );
+
+        for agent in [&agent_a, &agent_b] {
+            assert_eq!(
+                effective_prompt_author(&event, Some(&relay.public_key().to_hex()), agent),
+                owner
+            );
+        }
+    }
+
+    #[test]
+    fn bridge_p_tag_without_matching_explicit_target_keeps_relay_signer() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let other = Keys::generate().public_key().to_hex();
+        let event = bridge_event(
+            &relay,
+            Some(&owner),
+            &[&["buzz:bridge", "github"]],
+            &[&["buzz:bridge-mention", other.as_str()]],
+            &[owner.as_str(), agent.as_str(), other.as_str()],
+        );
+
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex()), &agent),
+            relay.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn forged_or_tampered_bridge_keeps_raw_signer() {
+        let relay = Keys::generate();
+        let attacker = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let mentions = [&["buzz:bridge-mention", agent.as_str()][..]];
+        let forged = bridge_event(
+            &attacker,
+            Some(&owner),
+            &[&["buzz:bridge", "github"]],
+            &mentions,
+            &[agent.as_str()],
+        );
+        assert_eq!(
+            effective_prompt_author(&forged, Some(&relay.public_key().to_hex()), &agent),
+            attacker.public_key().to_hex()
+        );
+
+        let mut tampered = bridge_event(
+            &relay,
+            Some(&owner),
+            &[&["buzz:bridge", "github"]],
+            &mentions,
+            &[agent.as_str()],
+        );
+        tampered.content = "tampered".into();
+        assert_eq!(
+            effective_prompt_author(&tampered, Some(&relay.public_key().to_hex()), &agent),
+            relay.public_key().to_hex()
+        );
+    }
+
+    #[test]
+    fn malformed_bridge_metadata_fails_closed() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let relay_hex = relay.public_key().to_hex();
+        let valid_mentions = [&["buzz:bridge-mention", agent.as_str()][..]];
+
+        for event in [
+            // No marker at all.
+            bridge_event(&relay, Some(&owner), &[], &valid_mentions, &[
+                agent.as_str(),
+            ]),
+            // No owner tag.
+            bridge_event(
+                &relay,
+                None,
+                &[&["buzz:bridge", "github"]],
+                &valid_mentions,
+                &[agent.as_str()],
+            ),
+            // Non-canonical marker value ("true" is the workflow marker, not
+            // the bridge one).
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "true"]],
+                &valid_mentions,
+                &[agent.as_str()],
+            ),
+            // Duplicate canonical marker.
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "github"], &["buzz:bridge", "github"]],
+                &valid_mentions,
+                &[agent.as_str()],
+            ),
+            // Marker with an extra field.
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "github", "extra"]],
+                &valid_mentions,
+                &[agent.as_str()],
+            ),
+            // Mention with an extra field.
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "github"]],
+                &[&["buzz:bridge-mention", agent.as_str(), "extra"]],
+                &[agent.as_str()],
+            ),
+            // Duplicate mention for the same agent.
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "github"]],
+                &[
+                    &["buzz:bridge-mention", agent.as_str()],
+                    &["buzz:bridge-mention", agent.as_str()],
+                ],
+                &[agent.as_str()],
+            ),
+            // Non-hex mention value.
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "github"]],
+                &[&["buzz:bridge-mention", "not-a-pubkey"]],
+                &[agent.as_str()],
+            ),
+        ] {
+            assert_eq!(
+                effective_prompt_author(&event, Some(&relay_hex), &agent),
+                relay_hex
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_workflow_and_bridge_families_fail_closed() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let relay_hex = relay.public_key().to_hex();
+
+        // An event is delegated through exactly one family; any combination of
+        // workflow and bridge tags on the same event must not delegate.
+        for event in [
+            // Both canonical markers on one event.
+            workflow_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:workflow", "true"], &["buzz:bridge", "github"]],
+                &[&["buzz:workflow-mention", agent.as_str()]],
+                &[agent.as_str()],
+            ),
+            // Workflow family plus a stray bridge-owner tag.
+            workflow_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:workflow", "true"], &["buzz:bridge-owner", owner.as_str()]],
+                &[&["buzz:workflow-mention", agent.as_str()]],
+                &[agent.as_str()],
+            ),
+            // Bridge family plus a stray workflow-mention tag.
+            bridge_event(
+                &relay,
+                Some(&owner),
+                &[&["buzz:bridge", "github"]],
+                &[
+                    &["buzz:bridge-mention", agent.as_str()],
+                    &["buzz:workflow-mention", agent.as_str()],
+                ],
+                &[agent.as_str()],
+            ),
+        ] {
+            assert_eq!(
+                effective_prompt_author(&event, Some(&relay_hex), &agent),
+                relay_hex
+            );
+        }
     }
 
     #[test]
