@@ -83,12 +83,27 @@ impl BridgeState {
     /// asked for the bridge, so a broken secret must stop the relay, not
     /// disable signature checks.
     pub fn load(config: &GitHubConfig) -> Result<Self, String> {
-        let webhook_secret = std::fs::read(&config.webhook_secret_path).map_err(|e| {
+        // Trim edge whitespace: editors and CLI redirects routinely terminate
+        // secret files with a newline, and that byte must not become part of
+        // the HMAC key (GitHub signs with the pasted value, no newline).
+        let mut webhook_secret = std::fs::read(&config.webhook_secret_path).map_err(|e| {
             format!(
                 "BUZZ_GITHUB_WEBHOOK_SECRET_PATH={} could not be read: {e}",
                 config.webhook_secret_path.display()
             )
         })?;
+        while webhook_secret
+            .last()
+            .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            webhook_secret.pop();
+        }
+        while webhook_secret
+            .first()
+            .is_some_and(|b| b.is_ascii_whitespace())
+        {
+            webhook_secret.remove(0);
+        }
         if webhook_secret.is_empty() {
             return Err(format!(
                 "BUZZ_GITHUB_WEBHOOK_SECRET_PATH={} is empty — refusing to run the \
