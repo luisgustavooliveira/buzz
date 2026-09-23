@@ -547,9 +547,9 @@ pub async fn claim_due_outbox(
         FROM candidates c
         WHERE o.community_id = c.community_id
           AND o.id = c.id
-        RETURNING id, community_id, action, link_repo, link_number,
-                  event_id, author_pubkey, payload, status, attempts,
-                  next_retry_at, last_error, github_comment_id, created_at
+        RETURNING o.id, o.community_id, o.action, o.link_repo, o.link_number,
+                  o.event_id, o.author_pubkey, o.payload, o.status, o.attempts,
+                  o.next_retry_at, o.last_error, o.github_comment_id, o.created_at
         "#,
     )
     .bind(now)
