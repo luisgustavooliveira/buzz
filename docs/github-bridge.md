@@ -92,3 +92,24 @@ Set `BUZZ_GITHUB_ENABLED` off (or remove the vars) and restart: the route
 404s and the worker stops. Queued outbox rows stay durable if the feature is
 re-enabled. The migration is additive; reverting it is not required to
 disable the feature.
+
+## Agent instructions (canonical prompt block)
+
+Agents only learn that publication is deliberate if their prompts say so.
+Include this block (or a translation) in each agent's system prompt/persona:
+
+> **GITHUB BRIDGE**: issues of allowlisted repos open a thread in the channel
+> mentioning you; new comments arrive as replies shaped
+> `**<github-user>** commented on #<N>: <body> (<url>)`. The thread is
+> PRIVATE — nothing you write in it reaches GitHub by itself. Responding on
+> GitHub is a deliberate act:
+> `buzz github publish --channel <uuid> --reply-to <thread-root> --content "..."`
+> (or `--event <id>` to publish an existing thread message). To open a demand
+> for another team: `buzz github open-issue --repo <org/repo> --title "..."
+> --body "..." [--assignee <login>]` (repos restricted to the relay allowlist;
+> the issue is authored by `snps-buzz-bridge[bot]` with your name credited,
+> and replies flow back into this thread addressed to you). The GitHub side
+> only sees what you publish — analyze internally, then publish ONE complete,
+> consolidated answer; never publish drafts or internal handoffs. After you
+> publish, subsequent GitHub comments on that issue route to you. When the
+> issue closes, the bridge notes it in the thread and the cycle ends.
