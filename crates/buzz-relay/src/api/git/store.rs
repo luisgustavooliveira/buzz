@@ -101,14 +101,17 @@ pub enum StoreError {
 
 /// Configuration for `GitStore::run_conformance_probe`.
 ///
-/// Defaults: 32-way concurrency, 3 rounds. The probe is a deployment gate —
-/// run at startup, fail-closed. See `docs/git-on-object-storage.md` §Conformance.
+/// Defaults: 32-way concurrency, 3 rounds, 60-second overall deadline. The
+/// probe is a deployment gate — run at startup, fail-closed. See
+/// `docs/git-on-object-storage.md` §Conformance.
 #[derive(Debug, Clone)]
 pub struct ProbeConfig {
     /// How many tasks race per round. Must be ≥ 2.
     pub race_width: usize,
     /// How many rounds to run each race phase.
     pub race_rounds: usize,
+    /// Maximum wall-clock time for the complete probe, including all rounds.
+    pub timeout: std::time::Duration,
 }
 
 impl Default for ProbeConfig {
@@ -116,6 +119,7 @@ impl Default for ProbeConfig {
         Self {
             race_width: 32,
             race_rounds: 3,
+            timeout: std::time::Duration::from_secs(60),
         }
     }
 }
@@ -149,7 +153,8 @@ pub struct ProbeReport {
 #[derive(Debug, thiserror::Error)]
 #[error("conformance probe failed in phase '{phase}' (round {round}, key {key}): {reason}")]
 pub struct ProbeFailure {
-    /// One of `sequential`, `if_match_race`, `if_none_match_race`, `etag_consistency`.
+    /// One of `config`, `sequential`, `if_match_race`, `if_none_match_race`,
+    /// `etag_consistency`, or `timeout`.
     pub phase: &'static str,
     /// Round index (0-based) when this phase ran multiple rounds.
     pub round: usize,
@@ -217,6 +222,11 @@ impl GitStore {
             buzz_media::config::S3AddressingStyle::Path => bucket.with_path_style(),
             buzz_media::config::S3AddressingStyle::Virtual => bucket,
         };
+        // Bucket::new records a default request_timeout but builds its async
+        // HTTP client with ClientOptions::default() (None). Apply it explicitly.
+        let bucket = bucket
+            .with_request_timeout(std::time::Duration::from_secs(30))
+            .map_err(StoreError::Backend)?;
         Ok(Self {
             bucket: Arc::from(bucket),
         })
@@ -573,7 +583,36 @@ impl GitStore {
     /// 4. **`etag_consistency`** — round-trip an ETag from `get_pointer` into
     ///    `put_pointer(IfMatch(...))` and assert `Won`. Tests that the token
     ///    is opaque and stable between read and CAS.
+    ///
+    /// The overall deadline bounds all phases and rounds. On expiration, the
+    /// probe and every in-flight race future are dropped and startup fails.
     pub async fn run_conformance_probe(&self, cfg: ProbeConfig) -> Result<ProbeReport, StoreError> {
+        if cfg.timeout.is_zero() {
+            return Err(ProbeFailure {
+                phase: "config",
+                round: 0,
+                key: String::new(),
+                reason: "timeout must be greater than zero".into(),
+            }
+            .into());
+        }
+        let timeout = cfg.timeout;
+        match tokio::time::timeout(timeout, self.run_conformance_probe_inner(cfg)).await {
+            Ok(result) => result,
+            Err(_) => Err(ProbeFailure {
+                phase: "timeout",
+                round: 0,
+                key: String::new(),
+                reason: format!("overall deadline of {}ms exceeded", timeout.as_millis()),
+            }
+            .into()),
+        }
+    }
+
+    async fn run_conformance_probe_inner(
+        &self,
+        cfg: ProbeConfig,
+    ) -> Result<ProbeReport, StoreError> {
         use std::sync::Arc;
         if cfg.race_width < 2 || cfg.race_rounds == 0 {
             return Err(ProbeFailure {
@@ -594,6 +633,7 @@ impl GitStore {
         let mut transport_drops = 0usize;
 
         // -- Phase 1: sequential --------------------------------------------------
+        tracing::info!(phase = "sequential", "git conformance probe phase started");
         for round in 0..cfg.race_rounds {
             let body = format!("probe-sequential-{nonce}-{round}").into_bytes();
             let key = self.put_pack(&body).await?;
@@ -618,6 +658,10 @@ impl GitStore {
         }
 
         // -- Phase 2: if_match_race -----------------------------------------------
+        tracing::info!(
+            phase = "if_match_race",
+            "git conformance probe phase started"
+        );
         // Seed the pointer with a known value, then race N IfMatch updates.
         let seed = b"probe-pointer-seed".to_vec();
         let _ = self.bucket.delete_object(&pointer_key).await; // ignore 404
@@ -724,6 +768,10 @@ impl GitStore {
         }
 
         // -- Phase 3: if_none_match_race ------------------------------------------
+        tracing::info!(
+            phase = "if_none_match_race",
+            "git conformance probe phase started"
+        );
         // N parallel create-only writes targeting the same digest-shaped key.
         // Bypass `put_immutable`'s 412-swallow to count raw outcomes.
         for round in 0..cfg.race_rounds {
@@ -841,6 +889,10 @@ impl GitStore {
         }
 
         // -- Phase 4: etag_consistency --------------------------------------------
+        tracing::info!(
+            phase = "etag_consistency",
+            "git conformance probe phase started"
+        );
         // GET pointer, take its ETag, CAS-update with that ETag, expect Won.
         // Proves the token round-trips opaquely between read and write.
         for round in 0..cfg.race_rounds {
@@ -1014,6 +1066,53 @@ mod tests {
             );
         }
     }
+
+    #[tokio::test]
+    async fn conformance_probe_times_out_when_backend_never_responds() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind hanging backend");
+        let address = listener.local_addr().expect("backend address");
+        let server = tokio::spawn(async move {
+            let mut connections = Vec::new();
+            loop {
+                let connection = listener.accept().await.expect("accept connection");
+                connections.push(connection);
+            }
+        });
+        let store = GitStore::new(
+            &format!("http://{address}"),
+            "buzz_dev",
+            "buzz_dev_secret",
+            "buzz-git",
+            "us-east-1",
+            buzz_media::config::S3AddressingStyle::Path,
+        )
+        .expect("construct git store");
+
+        let started = std::time::Instant::now();
+        let err = store
+            .run_conformance_probe(ProbeConfig {
+                race_width: 2,
+                race_rounds: 1,
+                timeout: std::time::Duration::from_millis(50),
+            })
+            .await
+            .expect_err("a non-responsive backend must fail the probe");
+        server.abort();
+
+        assert!(
+            matches!(
+                &err,
+                StoreError::Probe(ProbeFailure {
+                    phase: "timeout",
+                    ..
+                })
+            ),
+            "expected overall timeout, got {err:?}"
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    }
 }
 
 #[cfg(test)]
@@ -1179,16 +1278,25 @@ mod probe {
             return;
         }
         let st = store();
+        let race_width = std::env::var("BUZZ_GIT_PROBE_WRITERS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8);
+        let race_rounds = std::env::var("BUZZ_GIT_PROBE_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2);
         let report = st
             .run_conformance_probe(ProbeConfig {
-                race_width: 8,
-                race_rounds: 2,
+                race_width,
+                race_rounds,
+                timeout: std::time::Duration::from_secs(60),
             })
             .await
             .expect("conformance probe");
         eprintln!("✓ probe report: {report:?}");
-        assert_eq!(report.race_width, 8);
-        assert_eq!(report.race_rounds, 2);
+        assert_eq!(report.race_width, race_width);
+        assert_eq!(report.race_rounds, race_rounds);
     }
 
     /// Quick probe: confirm rust-s3's `get_object` exposes ETag on the response.

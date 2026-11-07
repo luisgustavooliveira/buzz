@@ -380,6 +380,14 @@ checkable.
 If the probe passes, A3 is admitted for that backend and Theorems 1–3 transfer
 unchanged.
 
+The complete probe is bounded by `BUZZ_GIT_PROBE_TIMEOUT_SECS` (default 60
+seconds), and each GitStore S3 request has a 30-second timeout. Exceeding the
+overall deadline is startup-fatal and drops all in-flight race futures. Probe
+keys include a random nonce; failed or timed-out attempts can leave those
+unique objects for the bucket retention policy, but cannot collide with a later
+attempt. Pointer cleanup remains best-effort and never weakens the admission
+gate.
+
 ## Prior Art
 
 The *algorithm* is established; the *formal characterization* is, to our

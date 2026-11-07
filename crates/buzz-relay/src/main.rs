@@ -571,13 +571,19 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(3);
+        let timeout_secs = std::env::var("BUZZ_GIT_PROBE_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
         let cfg = buzz_relay::api::git::store::ProbeConfig {
             race_width,
             race_rounds,
+            timeout: std::time::Duration::from_secs(timeout_secs),
         };
         tracing::info!(
             race_width,
             race_rounds,
+            timeout_secs,
             "running git object-store conformance probe (A3 gate)"
         );
         let report = state
