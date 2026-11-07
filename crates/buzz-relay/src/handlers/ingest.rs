@@ -3144,13 +3144,15 @@ async fn ingest_event_inner(
         });
     }
 
-    // GitHub bridge atomic ingest hook: a kind:9 event carrying
-    // `buzz:github-publish` / `buzz:github-action` tags must commit its
-    // `github_outbox` row in the SAME transaction as the event (one action =
-    // one atomic persist). The hook validates and returns the outbox plan;
-    // only the insert below branches on it.
+    // Optional bridge hooks persist the event and its outbound action in one
+    // transaction. Each hook returns None for an ordinary kind:9 event.
     let github_outbox = if kind_u32 == KIND_STREAM_MESSAGE {
         crate::github_bridge::try_ingest_hook(tenant, state, &event, thread_meta.as_ref()).await?
+    } else {
+        None
+    };
+    let email_outbox = if kind_u32 == KIND_STREAM_MESSAGE {
+        crate::email_bridge::try_ingest_hook(tenant, state, &event, thread_meta.as_ref()).await?
     } else {
         None
     };
@@ -3180,8 +3182,8 @@ async fn ingest_event_inner(
             .map_err(|e| IngestError::Internal(format!("error: {e}")))?
     } else {
         let thread_params = thread_meta.as_ref().map(|m| m.as_params());
-        let insert_result = match github_outbox {
-            Some(plan) => {
+        let insert_result = match (github_outbox, email_outbox) {
+            (Some(plan), None) => {
                 state
                     .db
                     .insert_event_with_github_outbox(
@@ -3193,7 +3195,19 @@ async fn ingest_event_inner(
                     )
                     .await
             }
-            None => {
+            (None, Some(plan)) => {
+                state
+                    .db
+                    .insert_event_with_email_outbox(
+                        tenant.community(),
+                        &event,
+                        channel_id,
+                        thread_params,
+                        plan.as_insert(&event),
+                    )
+                    .await
+            }
+            (None, None) => {
                 state
                     .db
                     .insert_event_with_thread_metadata(
@@ -3203,6 +3217,11 @@ async fn ingest_event_inner(
                         thread_params,
                     )
                     .await
+            }
+            (Some(_), Some(_)) => {
+                return Err(IngestError::Rejected(
+                    "invalid: one event cannot trigger two bridge outboxes".into(),
+                ))
             }
         };
         match insert_result {

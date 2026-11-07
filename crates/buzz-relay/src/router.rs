@@ -137,6 +137,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/integrations/github/webhook",
             post(api::github::github_webhook),
         )
+        // Microsoft Graph email notifications (clientState-authenticated).
+        .route("/integrations/email/graph", post(api::email::graph_webhook))
         // Mesh demo echo probe — testbed-only; 404 unless BUZZ_MESH=on and
         // BUZZ_MESH_DEMO_ECHO=on (see api::mesh_demo).
         .route("/_mesh/demo/echo", post(api::mesh_demo::demo_echo))

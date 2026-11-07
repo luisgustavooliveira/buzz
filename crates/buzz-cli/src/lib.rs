@@ -198,6 +198,9 @@ enum Cmd {
     /// Publish messages to GitHub via the relay's optional GitHub bridge
     #[command(subcommand)]
     Github(GithubCmd),
+    /// Send personalized email through the relay's optional V1 email bridge
+    #[command(subcommand)]
+    Email(EmailCmd),
     /// List, open, and manage direct messages
     #[command(subcommand)]
     Dms(DmsCmd),
@@ -594,6 +597,37 @@ pub enum GithubCmd {
         /// Thread message event ID to reply under (64-char hex); omit for a top-level message
         #[arg(long)]
         reply_to: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum EmailCmd {
+    /// Send a new email or reply within an existing email-backed Buzz thread
+    #[command(
+        after_help = "Example:\n  buzz email send --channel <UUID> --subject 'Status' --to luis@snpsgroup.com --content 'Concluído'"
+    )]
+    Send {
+        /// Channel UUID hosting the mirrored conversation
+        #[arg(long)]
+        channel: String,
+        /// Existing email thread event ID; omit for a new conversation
+        #[arg(long)]
+        reply_to: Option<String>,
+        /// Single-line email subject
+        #[arg(long)]
+        subject: String,
+        /// Plain-text body; use '-' to read from stdin
+        #[arg(long)]
+        content: String,
+        /// To recipient; repeatable
+        #[arg(long = "to")]
+        to: Vec<String>,
+        /// Cc recipient; repeatable
+        #[arg(long = "cc")]
+        cc: Vec<String>,
+        /// Bcc recipient; repeatable
+        #[arg(long = "bcc")]
+        bcc: Vec<String>,
     },
 }
 
@@ -2174,6 +2208,7 @@ async fn run(cli: Cli) -> Result<(), CliError> {
         Cmd::Emoji(sub) => commands::emoji::dispatch(sub, &client).await,
         Cmd::Gifs(sub) => commands::gifs::dispatch(sub, &client).await,
         Cmd::Github(sub) => commands::github::dispatch(sub, &client).await,
+        Cmd::Email(sub) => commands::email::dispatch(sub, &client).await,
         Cmd::Dms(sub) => commands::dms::dispatch(sub, &client).await,
         Cmd::Users(sub) => commands::users::dispatch(sub, &client, &cli.format).await,
         Cmd::Workflows(sub) => commands::workflows::dispatch(sub, &client).await,
@@ -2420,6 +2455,7 @@ mod tests {
             "canvas",
             "channels",
             "dms",
+            "email",
             "emoji",
             "feed",
             "gifs",
@@ -2551,6 +2587,7 @@ mod tests {
         );
         assert_eq!(names(&cmd, "feed"), vec!["get"]);
         assert_eq!(names(&cmd, "github"), vec!["open-issue", "publish"]);
+        assert_eq!(names(&cmd, "email"), vec!["send"]);
         assert_eq!(
             names(&cmd, "social"),
             vec![
@@ -2633,6 +2670,7 @@ mod tests {
             ("channels", 16),
             ("dms", 4),
             ("emoji", 5),
+            ("email", 1),
             ("feed", 1),
             ("github", 2),
             ("issues", 6),

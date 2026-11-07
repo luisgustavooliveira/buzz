@@ -702,7 +702,7 @@ mod postgres_tests {
         let mut migrations: Vec<_> = MIGRATOR.iter().collect();
         migrations.sort_by_key(|migration| migration.version);
 
-        assert_eq!(migrations.len(), 45);
+        assert_eq!(migrations.len(), 46);
         assert_eq!(migrations[0].version, 1);
         assert_eq!(&*migrations[0].description, "initial schema");
         assert!(migrations[0]
@@ -1296,6 +1296,23 @@ mod postgres_tests {
         assert!(github_bridge.contains("CREATE TABLE github_outbox"));
         assert!(github_bridge.contains("attach_community_write_fence('github_thread_links')"));
         assert!(github_bridge.contains("attach_community_write_fence('github_outbox')"));
+
+        // Email bridge (0046): V1 is additive and keeps V2 external participant
+        // fields without enabling them by default.
+        assert_eq!(migrations[45].version, 46);
+        let email_bridge = migrations[45].sql.as_str();
+        for table in [
+            "email_conversations",
+            "email_participants",
+            "email_messages",
+            "email_outbox",
+            "email_quarantine",
+        ] {
+            assert!(email_bridge.contains(&format!("CREATE TABLE {table}")));
+            assert!(email_bridge.contains(&format!("attach_community_write_fence('{table}')")));
+            assert!(desired_schema.contains(&format!("CREATE TABLE {table}")));
+        }
+        assert!(email_bridge.contains("external_enabled      BOOLEAN NOT NULL DEFAULT FALSE"));
     }
 
     #[test]

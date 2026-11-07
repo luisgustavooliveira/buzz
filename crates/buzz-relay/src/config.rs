@@ -157,6 +157,93 @@ impl GitHubConfig {
     }
 }
 
+/// Optional V1 email bridge. The From address is always derived from the
+/// signing identity; no client-supplied sender is accepted.
+#[derive(Debug, Clone)]
+pub struct EmailConfig {
+    /// SMTP host used for Postal STARTTLS.
+    pub smtp_host: String,
+    /// SMTP port.
+    pub smtp_port: u16,
+    /// File containing the Postal username.
+    pub smtp_username_path: std::path::PathBuf,
+    /// File containing the Postal password.
+    pub smtp_password_path: std::path::PathBuf,
+    /// Domain used in generated, random Message-IDs.
+    pub message_id_domain: String,
+    /// Agent mailbox and identity routes.
+    pub accounts: Vec<EmailAccountConfig>,
+    /// Relay participants authorized to reply in V1.
+    pub allowed_senders: Vec<EmailSenderConfig>,
+    /// Optional Graph inbound configuration; outbound can run without it.
+    pub graph: Option<EmailGraphConfig>,
+}
+
+/// Agent address, mailbox and Buzz authority mapping.
+#[derive(Debug, Clone)]
+pub struct EmailAccountConfig {
+    /// Agent pubkey, lowercase 64-character hex.
+    pub agent_pubkey: String,
+    /// Personalized sender and reply address.
+    pub address: String,
+    /// Display name used in From.
+    pub display_name: String,
+    /// Exchange mailbox object ID, used to identify BCC deliveries.
+    pub mailbox_id: String,
+    /// Owner used by authenticated relay delegation to wake the agent.
+    pub owner_pubkey: String,
+    /// Graph subscription expected for this mailbox, once provisioned.
+    pub graph_subscription_id: Option<uuid::Uuid>,
+}
+
+/// Human or agent allowed to reply to known V1 conversations.
+#[derive(Debug, Clone)]
+pub struct EmailSenderConfig {
+    /// Canonical lowercase address.
+    pub address: String,
+    /// Relay identity associated with the address.
+    pub pubkey: String,
+}
+
+/// Microsoft Graph client credentials and webhook authentication.
+#[derive(Debug, Clone)]
+pub struct EmailGraphConfig {
+    /// Microsoft Entra tenant ID.
+    pub tenant_id: String,
+    /// Application client ID.
+    pub client_id: String,
+    /// File containing the application client secret.
+    pub client_secret_path: std::path::PathBuf,
+    /// File containing the random webhook clientState.
+    pub client_state_path: std::path::PathBuf,
+    /// Graph base URL; overridable for local integration tests.
+    pub api_base_url: String,
+}
+
+impl EmailConfig {
+    /// Resolve an agent's authorized sender account.
+    pub fn account_for_agent(&self, pubkey: &str) -> Option<&EmailAccountConfig> {
+        self.accounts.iter().find(|a| a.agent_pubkey == pubkey)
+    }
+
+    /// Resolve an account by canonical email address.
+    pub fn account_for_address(&self, address: &str) -> Option<&EmailAccountConfig> {
+        self.accounts.iter().find(|a| a.address == address)
+    }
+
+    /// Resolve an account by Exchange mailbox object ID.
+    pub fn account_for_mailbox(&self, mailbox_id: &str) -> Option<&EmailAccountConfig> {
+        self.accounts
+            .iter()
+            .find(|a| a.mailbox_id.eq_ignore_ascii_case(mailbox_id))
+    }
+
+    /// Resolve an authorized V1 sender.
+    pub fn allowed_sender(&self, address: &str) -> Option<&EmailSenderConfig> {
+        self.allowed_senders.iter().find(|s| s.address == address)
+    }
+}
+
 /// Maximum configured jitter, leaving ten seconds of the hard-drain budget for
 /// WebSocket close-frame delivery after the final delayed cancellation.
 pub const MAX_DRAIN_JITTER_MS: u64 = 20_000;
@@ -341,6 +428,10 @@ pub struct Config {
     /// Optional GitHub bridge (`BUZZ_GITHUB_*`). Unset means the webhook route
     /// 404s, no GitHub API client exists, and the outbox worker never starts.
     pub github: Option<GitHubConfig>,
+
+    /// Optional email bridge (`BUZZ_EMAIL_*`). Unset means no email routes,
+    /// no Postal client and no Graph worker.
+    pub email: Option<EmailConfig>,
 
     /// Media storage configuration (S3/MinIO).
     pub media: buzz_media::MediaConfig,
@@ -741,6 +832,200 @@ fn parse_github_config(
     }))
 }
 
+/// Canonicalize an email address for identity and participant mapping.
+pub(crate) fn canonical_email_address(value: &str) -> Option<String> {
+    let value = value.trim().to_lowercase();
+    if value.len() > 254 || value.chars().any(char::is_whitespace) {
+        return None;
+    }
+    let (local, domain) = value.split_once('@')?;
+    if local.is_empty()
+        || domain.is_empty()
+        || domain.contains('@')
+        || local.starts_with('.')
+        || local.ends_with('.')
+        || local.contains("..")
+        || !domain.contains('.')
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn parse_email_config(
+    lookup: impl Fn(&str) -> Option<String>,
+) -> Result<Option<EmailConfig>, ConfigError> {
+    let enabled = lookup("BUZZ_EMAIL_ENABLED")
+        .map(|v| v == "true" || v == "1" || v.eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+    if !enabled {
+        return Ok(None);
+    }
+    let required = |name: &str| {
+        lookup(name)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| ConfigError::InvalidValue(format!("BUZZ_EMAIL_ENABLED requires {name}")))
+    };
+    let smtp_host = required("BUZZ_EMAIL_SMTP_HOST")?;
+    let smtp_port = required("BUZZ_EMAIL_SMTP_PORT")?
+        .parse::<u16>()
+        .map_err(|_| {
+            ConfigError::InvalidValue("BUZZ_EMAIL_SMTP_PORT must be a valid port".into())
+        })?;
+    let smtp_username_path = required("BUZZ_EMAIL_SMTP_USERNAME_PATH")?.into();
+    let smtp_password_path = required("BUZZ_EMAIL_SMTP_PASSWORD_PATH")?.into();
+    let message_id_domain = required("BUZZ_EMAIL_MESSAGE_ID_DOMAIN")?.to_lowercase();
+    if message_id_domain.starts_with('.')
+        || message_id_domain.ends_with('.')
+        || !message_id_domain.contains('.')
+        || !message_id_domain
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_EMAIL_MESSAGE_ID_DOMAIN must be a DNS domain".into(),
+        ));
+    }
+
+    #[derive(serde::Deserialize)]
+    struct RawAccount {
+        agent_pubkey: String,
+        address: String,
+        display_name: String,
+        mailbox_id: String,
+        owner_pubkey: String,
+        graph_subscription_id: Option<String>,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawSender {
+        address: String,
+        pubkey: String,
+    }
+    #[derive(serde::Deserialize)]
+    struct RawRoutes {
+        accounts: Vec<RawAccount>,
+        allowed_senders: Vec<RawSender>,
+    }
+    let routes: RawRoutes = serde_json::from_str(&required("BUZZ_EMAIL_ROUTES")?).map_err(|e| {
+        ConfigError::InvalidValue(format!("BUZZ_EMAIL_ROUTES is not valid JSON: {e}"))
+    })?;
+    let valid_pubkey =
+        |value: &str| value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit());
+    let mut accounts = Vec::with_capacity(routes.accounts.len());
+    let mut seen_agents = std::collections::HashSet::new();
+    let mut seen_addresses = std::collections::HashSet::new();
+    let mut seen_mailboxes = std::collections::HashSet::new();
+    for raw in routes.accounts {
+        let agent_pubkey = raw.agent_pubkey.to_lowercase();
+        let owner_pubkey = raw.owner_pubkey.to_lowercase();
+        if !valid_pubkey(&agent_pubkey) || !valid_pubkey(&owner_pubkey) {
+            return Err(ConfigError::InvalidValue(
+                "email account agent_pubkey/owner_pubkey must be 64-character hex".into(),
+            ));
+        }
+        let address = canonical_email_address(&raw.address).ok_or_else(|| {
+            ConfigError::InvalidValue(format!("invalid email account address {:?}", raw.address))
+        })?;
+        let mailbox_id = raw.mailbox_id.trim().to_string();
+        let display_name = raw.display_name.trim().to_string();
+        if mailbox_id.is_empty() || display_name.is_empty() || display_name.contains(['\r', '\n']) {
+            return Err(ConfigError::InvalidValue(
+                "email account requires a mailbox_id and single-line display_name".into(),
+            ));
+        }
+        let graph_subscription_id = raw
+            .graph_subscription_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(|v| {
+                v.parse::<uuid::Uuid>().map_err(|_| {
+                    ConfigError::InvalidValue("graph_subscription_id must be a UUID".into())
+                })
+            })
+            .transpose()?;
+        if !seen_agents.insert(agent_pubkey.clone())
+            || !seen_addresses.insert(address.clone())
+            || !seen_mailboxes.insert(mailbox_id.to_lowercase())
+        {
+            return Err(ConfigError::InvalidValue(
+                "email accounts must have unique agent, address and mailbox".into(),
+            ));
+        }
+        accounts.push(EmailAccountConfig {
+            agent_pubkey,
+            address,
+            display_name,
+            mailbox_id,
+            owner_pubkey,
+            graph_subscription_id,
+        });
+    }
+    if accounts.is_empty() {
+        return Err(ConfigError::InvalidValue(
+            "BUZZ_EMAIL_ROUTES must configure at least one agent account".into(),
+        ));
+    }
+    let mut allowed_senders = Vec::with_capacity(routes.allowed_senders.len());
+    let mut seen_senders = std::collections::HashSet::new();
+    for raw in routes.allowed_senders {
+        let address = canonical_email_address(&raw.address).ok_or_else(|| {
+            ConfigError::InvalidValue(format!("invalid allowed sender address {:?}", raw.address))
+        })?;
+        let pubkey = raw.pubkey.to_lowercase();
+        if !valid_pubkey(&pubkey) {
+            return Err(ConfigError::InvalidValue(
+                "email allowed sender pubkey must be 64-character hex".into(),
+            ));
+        }
+        if !seen_senders.insert(address.clone()) {
+            return Err(ConfigError::InvalidValue(format!(
+                "email allowed sender {address} is duplicated"
+            )));
+        }
+        allowed_senders.push(EmailSenderConfig { address, pubkey });
+    }
+
+    let graph_enabled = lookup("BUZZ_EMAIL_GRAPH_ENABLED")
+        .map(|v| v == "true" || v == "1" || v.eq_ignore_ascii_case("on"))
+        .unwrap_or(false);
+    if graph_enabled
+        && accounts
+            .iter()
+            .any(|account| account.graph_subscription_id.is_none())
+    {
+        return Err(ConfigError::InvalidValue(
+            "Graph inbound requires graph_subscription_id on every email account".into(),
+        ));
+    }
+    let graph = if graph_enabled {
+        Some(EmailGraphConfig {
+            tenant_id: required("BUZZ_EMAIL_GRAPH_TENANT_ID")?,
+            client_id: required("BUZZ_EMAIL_GRAPH_CLIENT_ID")?,
+            client_secret_path: required("BUZZ_EMAIL_GRAPH_CLIENT_SECRET_PATH")?.into(),
+            client_state_path: required("BUZZ_EMAIL_GRAPH_CLIENT_STATE_PATH")?.into(),
+            api_base_url: lookup("BUZZ_EMAIL_GRAPH_API_BASE_URL")
+                .map(|v| v.trim().trim_end_matches('/').to_string())
+                .filter(|v| !v.is_empty())
+                .unwrap_or_else(|| "https://graph.microsoft.com/v1.0".into()),
+        })
+    } else {
+        None
+    };
+
+    Ok(Some(EmailConfig {
+        smtp_host,
+        smtp_port,
+        smtp_username_path,
+        smtp_password_path,
+        message_id_domain,
+        accounts,
+        allowed_senders,
+        graph,
+    }))
+}
+
 impl Config {
     /// Loads configuration from environment variables, falling back to development defaults.
     pub fn from_env() -> Result<Self, ConfigError> {
@@ -920,6 +1205,7 @@ impl Config {
             .map(|api_key| KlipyConfig { api_key });
 
         let github = parse_github_config(|name| std::env::var(name).ok())?;
+        let email = parse_email_config(|name| std::env::var(name).ok())?;
 
         // Note: intentionally not prefixed with BUZZ_ — this is a relay-identity
         // config that may be shared across multiple services (e.g., ACP agent).
@@ -1442,6 +1728,7 @@ impl Config {
             allow_nip_oa_auth,
             klipy,
             github,
+            email,
             media,
             media_max_concurrent_uploads,
             media_max_concurrent_uploads_per_pubkey,
@@ -2669,6 +2956,65 @@ mod tests {
         assert!(
             matches!(result, Err(ConfigError::InvalidValue(ref msg)) if msg.contains("BUZZ_GIT_REPO_PATH")),
             "expected InvalidValue mentioning BUZZ_GIT_REPO_PATH, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn email_config_is_disabled_without_opt_in() {
+        let parsed = parse_email_config(|name| {
+            (name == "BUZZ_EMAIL_SMTP_HOST").then(|| "smtp.snpsgroup.com".into())
+        })
+        .expect("disabled email config");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn email_config_binds_agent_address_and_relay_sender() {
+        let agent = "a".repeat(64);
+        let owner = "b".repeat(64);
+        let human = "c".repeat(64);
+        let routes = format!(
+            r#"{{"accounts":[{{"agent_pubkey":"{agent}","address":"Melissa.Ferraz@snpsgroup.com","display_name":"Melissa Ferraz","mailbox_id":"mailbox-1","owner_pubkey":"{owner}"}}],"allowed_senders":[{{"address":"Luis@snpsgroup.com","pubkey":"{human}"}}]}}"#
+        );
+        let parsed = parse_email_config(|name| match name {
+            "BUZZ_EMAIL_ENABLED" => Some("true".into()),
+            "BUZZ_EMAIL_SMTP_HOST" => Some("smtp.snpsgroup.com".into()),
+            "BUZZ_EMAIL_SMTP_PORT" => Some("25".into()),
+            "BUZZ_EMAIL_SMTP_USERNAME_PATH" => Some("/run/secrets/smtp-user".into()),
+            "BUZZ_EMAIL_SMTP_PASSWORD_PATH" => Some("/run/secrets/smtp-pass".into()),
+            "BUZZ_EMAIL_MESSAGE_ID_DOMAIN" => Some("snpsgroup.com".into()),
+            "BUZZ_EMAIL_ROUTES" => Some(routes.clone()),
+            _ => None,
+        })
+        .expect("valid email config")
+        .expect("enabled email config");
+        let account = parsed.account_for_agent(&agent).expect("agent account");
+        assert_eq!(account.address, "melissa.ferraz@snpsgroup.com");
+        assert_eq!(
+            parsed
+                .allowed_sender("luis@snpsgroup.com")
+                .map(|s| s.pubkey.as_str()),
+            Some(human.as_str())
+        );
+        assert!(parsed.graph.is_none());
+    }
+
+    #[test]
+    fn email_config_rejects_duplicate_mailbox_or_invalid_address() {
+        let routes = r#"{"accounts":[],"allowed_senders":[]}"#;
+        let result = parse_email_config(|name| match name {
+            "BUZZ_EMAIL_ENABLED" => Some("true".into()),
+            "BUZZ_EMAIL_SMTP_HOST" => Some("smtp.snpsgroup.com".into()),
+            "BUZZ_EMAIL_SMTP_PORT" => Some("25".into()),
+            "BUZZ_EMAIL_SMTP_USERNAME_PATH" => Some("/run/secrets/smtp-user".into()),
+            "BUZZ_EMAIL_SMTP_PASSWORD_PATH" => Some("/run/secrets/smtp-pass".into()),
+            "BUZZ_EMAIL_MESSAGE_ID_DOMAIN" => Some("snpsgroup.com".into()),
+            "BUZZ_EMAIL_ROUTES" => Some(routes.into()),
+            _ => None,
+        });
+        assert!(
+            result.is_err(),
+            "an enabled bridge without accounts must fail closed"
         );
     }
 }

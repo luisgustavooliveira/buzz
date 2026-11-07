@@ -790,6 +790,12 @@ pub struct AppState {
     /// Stops the GitHub bridge outbox worker during graceful shutdown (same
     /// pattern as [`Self::community_revalidator_cancel`]).
     pub github_worker_cancel: CancellationToken,
+
+    /// Email bridge runtime clients, set once at startup when enabled.
+    pub email: Arc<std::sync::OnceLock<crate::email_bridge::BridgeState>>,
+
+    /// Stops the email outbox worker during graceful shutdown.
+    pub email_worker_cancel: CancellationToken,
 }
 
 impl AppState {
@@ -969,6 +975,8 @@ impl AppState {
             mesh: Arc::new(std::sync::OnceLock::new()),
             github: Arc::new(std::sync::OnceLock::new()),
             github_worker_cancel: CancellationToken::new(),
+            email: Arc::new(std::sync::OnceLock::new()),
+            email_worker_cancel: CancellationToken::new(),
         };
         (
             state,

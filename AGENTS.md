@@ -144,6 +144,8 @@ non-hook commands.
 
 **Commit with `git commit -s`.** The required **DCO Check** fails any PR with a commit missing a `Signed-off-by` trailer, and `just hooks` installs a `commit-msg` hook that adds it to commits you create locally (`git rebase` and `git cherry-pick` still need `--signoff`) — if you build commit commands programmatically, include `-s` every time. To repair a branch that already has unsigned commits: `git rebase --signoff main`, then force-push.
 
+**Publish completed work.** After the relevant validation passes, commit the completed change with `git commit -s` and push the current branch to `origin`; do not leave completed work only in the local worktree. Keep unrelated changes out of the commit, never include secrets, and report any push failure explicitly. In the local fork, `origin` is the writable GitHub fork and `upstream` is the read-only `block/buzz` repository; never push local changes to `upstream`.
+
 Additional rules:
 - No `unsafe` code
 - Do not introduce new `unwrap()` or `expect()` in production paths — use `?` and proper error types

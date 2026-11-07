@@ -248,8 +248,8 @@ struct DelegationFamily {
 
 /// Delegation families accepted by the inbound author gate.
 ///
-/// Workflow messages and GitHub bridge messages share identical verification
-/// strictness; they differ only in tag names. An event must use exactly one
+/// Workflow and bridge messages share identical verification strictness;
+/// bridge families may share tag names but require distinct markers. An event must use exactly one
 /// family — tags from two families on the same event fail closed.
 const DELEGATION_FAMILIES: &[DelegationFamily] = &[
     DelegationFamily {
@@ -259,6 +259,11 @@ const DELEGATION_FAMILIES: &[DelegationFamily] = &[
     },
     DelegationFamily {
         marker: ["buzz:bridge", "github"],
+        owner_tag: "buzz:bridge-owner",
+        mention_tag: "buzz:bridge-mention",
+    },
+    DelegationFamily {
+        marker: ["buzz:bridge", "email"],
         owner_tag: "buzz:bridge-owner",
         mention_tag: "buzz:bridge-mention",
     },
@@ -290,24 +295,29 @@ fn verified_relay_delegation(
         return None;
     }
 
-    // Select the single delegation family this event uses. A family counts as
-    // used when any of its marker, owner, or mention tag names appear; tags
-    // from two families on one event leave no unambiguous delegation contract
-    // to verify against, so they fail closed.
-    let mut used_families = DELEGATION_FAMILIES.iter().filter(|family| {
-        event.tags.iter().any(|tag| {
-            matches!(
-                tag.as_slice().first().map(String::as_str),
-                Some(name)
-                    if name == family.marker[0]
-                        || name == family.owner_tag
-                        || name == family.mention_tag
-            )
-        })
-    });
+    // Select by the exact canonical marker. Bridge families intentionally share
+    // owner/mention tag names; counting those shared tags would make GitHub and
+    // email look mixed even when exactly one marker is present. Two markers, or
+    // tags from two families on one event, still fail closed below.
+    let mut used_families = DELEGATION_FAMILIES
+        .iter()
+        .filter(|family| event.tags.iter().any(|tag| tag.as_slice() == family.marker));
     let family = used_families.next()?;
     if used_families.next().is_some() {
         return None;
+    }
+    for other in DELEGATION_FAMILIES {
+        if other.marker == family.marker {
+            continue;
+        }
+        for tag in event.tags.iter() {
+            let name = tag.as_slice().first().map(String::as_str).unwrap_or("");
+            if (name == other.owner_tag && other.owner_tag != family.owner_tag)
+                || (name == other.mention_tag && other.mention_tag != family.mention_tag)
+            {
+                return None;
+            }
+        }
     }
 
     let markers: Vec<&[String]> = event
@@ -6488,6 +6498,24 @@ mod workflow_owner_tests {
             &[owner.as_str(), agent.as_str()],
         );
 
+        assert_eq!(
+            effective_prompt_author(&event, Some(&relay.public_key().to_hex()), &agent),
+            owner
+        );
+    }
+
+    #[test]
+    fn trusted_email_bridge_uses_owner_for_explicit_target() {
+        let relay = Keys::generate();
+        let owner = Keys::generate().public_key().to_hex();
+        let agent = Keys::generate().public_key().to_hex();
+        let event = bridge_event(
+            &relay,
+            Some(&owner),
+            &[&["buzz:bridge", "email"]],
+            &[&["buzz:bridge-mention", agent.as_str()]],
+            &[owner.as_str(), agent.as_str()],
+        );
         assert_eq!(
             effective_prompt_author(&event, Some(&relay.public_key().to_hex()), &agent),
             owner

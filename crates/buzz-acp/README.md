@@ -153,6 +153,7 @@ Two delegation families share identical verification strictness:
 
 - **Workflow:** `["buzz:workflow", "true"]` marker, `["buzz:workflow-owner", <hex>]`, `["buzz:workflow-mention", <hex>]`.
 - **GitHub bridge:** `["buzz:bridge", "github"]` marker, `["buzz:bridge-owner", <hex>]`, `["buzz:bridge-mention", <hex>]`.
+- **Email bridge:** the same tags with marker `["buzz:bridge", "email"]`.
 
 The owner tag means that owner scheduled the workflow or triggered the bridge
 message; it does not claim that the owner authored every word after template

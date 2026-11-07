@@ -19,6 +19,8 @@ pub mod config;
 pub mod conformance;
 /// WebSocket connection lifecycle and state.
 pub mod connection;
+/// V1 email bridge: Postal outbound and Microsoft Graph inbound.
+pub mod email_bridge;
 /// Relay error types.
 pub mod error;
 /// GitHub bridge core: inbound webhook routing, outbound outbox worker, and

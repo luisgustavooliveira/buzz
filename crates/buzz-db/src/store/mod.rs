@@ -18,6 +18,8 @@ pub mod community;
 pub mod deletion;
 /// Direct message channel persistence.
 pub mod dm;
+/// Optional email bridge persistence.
+pub mod email;
 /// Event storage and retrieval.
 pub mod event;
 /// Home feed queries.

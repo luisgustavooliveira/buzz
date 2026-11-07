@@ -854,6 +854,30 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
         info!("GitHub bridge disabled (BUZZ_GITHUB_ENABLED unset/false)");
     }
 
+    // V1 email bridge: Postal outbox always starts when enabled; Graph inbound
+    // remains inactive unless its own configuration is complete.
+    if let Some(email_config) = state.config.email.clone() {
+        let bridge = buzz_relay::email_bridge::BridgeState::load(&email_config)
+            .map_err(|e| anyhow::anyhow!("email bridge disabled by failure: {e}"))?;
+        if state.email.set(bridge).is_err() {
+            return Err(anyhow::anyhow!(
+                "email bridge state was already initialized (set exactly once)"
+            ));
+        }
+        let worker_state = Arc::clone(&state);
+        let worker_cancel = state.email_worker_cancel.clone();
+        tokio::spawn(async move {
+            buzz_relay::email_bridge::outbox_worker::run(worker_state, worker_cancel).await
+        });
+        info!(
+            accounts = email_config.accounts.len(),
+            graph_enabled = email_config.graph.is_some(),
+            "email bridge enabled: Postal outbox worker started"
+        );
+    } else {
+        info!("email bridge disabled (BUZZ_EMAIL_ENABLED unset/false)");
+    }
+
     // Action recovery worker: re-drives stranded relay_admin_actions rows whose
     // action lease expired before the enforcement state machine completed.
     // Crash safety: a process that died between claim and finalization leaves
@@ -1246,6 +1270,7 @@ async fn run_relay_main(boot: BootTracker) -> anyhow::Result<()> {
     // Stop the GitHub bridge outbox worker (its claimed rows' leases expire
     // and another pod — or this pod after restart — reclaims them).
     state.github_worker_cancel.cancel();
+    state.email_worker_cancel.cancel();
 
     // Signal the audit worker to stop accepting, flush buffered entries, and
     // exit. Uses a CancellationToken so it works regardless of how many
