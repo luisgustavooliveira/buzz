@@ -226,6 +226,16 @@ GitHub Release or a stable `mobile-vX.Y.Z` alias.
 
 ---
 
+## SNPS Fork Windows Build
+
+The SNPS fork has a separate, non-updating Windows lane for the corporate relay.
+It produces an unsigned per-user NSIS installer with an identity isolated from
+upstream Buzz, including sidecars used by local agents. See
+[docs/snps-desktop-windows.md](docs/snps-desktop-windows.md) for the upstream
+sync, GitHub Actions, MinIO publication, and Windows acceptance procedure.
+
+---
+
 ## Platform Support
 
 The release workflow builds **two separate macOS DMGs**: Apple
