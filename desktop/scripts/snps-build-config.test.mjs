@@ -24,7 +24,10 @@ test("SNPS package disables upstream updates and installs per user", () => {
   assert.equal(config.tauriConfig.productName, "Buzz SNPS");
   assert.equal(config.tauriConfig.identifier, "com.snpsgroup.buzz.desktop");
   assert.equal(config.tauriConfig.bundle.createUpdaterArtifacts, false);
-  assert.equal(config.tauriConfig.bundle.nsis.installMode, "currentUser");
+  assert.equal(
+    config.tauriConfig.bundle.windows.nsis.installMode,
+    "currentUser",
+  );
   assert.deepEqual(
     config.tauriConfig.plugins["deep-link"].desktop.schemes,
     [config.deepLinkScheme],

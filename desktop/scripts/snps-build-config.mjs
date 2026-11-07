@@ -27,7 +27,7 @@ export function snpsBuildConfig() {
       },
       bundle: {
         createUpdaterArtifacts: false,
-        nsis: { installMode: "currentUser" },
+        windows: { nsis: { installMode: "currentUser" } },
       },
     },
   };
