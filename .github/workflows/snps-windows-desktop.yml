@@ -129,6 +129,21 @@ jobs:
           BUZZ_BUILD_DEMO_SLUG: snps
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
+      # A Windows absolute frontendDist once parsed as a URL and Tauri silently
+      # embedded zero assets (exit 0), shipping an app that booted to a blank
+      # "can't reach this page". Fail the lane unless the frontend is embedded.
+      - name: Verify embedded frontend assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP="desktop/src-tauri/target/${TARGET}/release/buzz-desktop.exe"
+          COUNT=$(grep -a -o '/assets/[A-Za-z0-9._@-]*' "$APP" | sort -u | wc -l)
+          echo "Embedded frontend assets: $COUNT"
+          if [[ "$COUNT" -lt 50 ]]; then
+            echo "::error::buzz-desktop.exe embeds only $COUNT frontend assets; frontendDist was not packaged"
+            exit 1
+          fi
+
       - name: Stage and verify installer
         shell: bash
         env:
