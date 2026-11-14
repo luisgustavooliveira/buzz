@@ -119,6 +119,12 @@ jobs:
           cargo build --release --target "$TARGET" -p buzz-acp -p buzz-agent -p buzz-dev-mcp -p git-credential-nostr -p buzz-cli
           ./scripts/bundle-sidecars.sh "$TARGET"
 
+      # The restored Cargo cache can carry a previous run's installer despite
+      # the bundle exclusion; staging must only ever see this run's output.
+      - name: Drop stale bundles from restored cache
+        shell: bash
+        run: rm -rf "desktop/src-tauri/target/${TARGET}/release/bundle"
+
       - name: Build unsigned Buzz SNPS NSIS installer
         shell: bash
         run: cd desktop && pnpm tauri build --target "$TARGET" --bundles nsis --config src-tauri/tauri.snps.conf.json
