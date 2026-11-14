@@ -742,3 +742,16 @@ Autocomplete inserts a literal full label and a separator, including multi-word
 names. Only autocomplete settlement may move the caret past that separator;
 internal label spaces and deliberate ArrowLeft/click movement must be respected.
 See `docs/mention-editor.md` and `desktop/tests/e2e/mention-spacing.spec.ts`.
+
+---
+
+## SNPS fork: build and test only in CI
+
+On the SNPS operator host (`ansible01`), do **not** run `cargo`
+(build/check/test/clippy), `just ci`/`just test`, Tauri builds or the lefthook
+hooks that invoke them: a workspace `cargo check` froze the host on
+2026-11-14. Commit and push with `--no-verify`, then validate in GitHub
+Actions: open a **draft PR inside the fork** (`luisgustavooliveira/buzz`, never
+against `block/buzz`) to run `ci.yml`. Light, single-file checks (`node --test`
+on one file) are fine. Canonical rule: `Infra/AGENTS.md` › "Builds e
+compilação pesada".
