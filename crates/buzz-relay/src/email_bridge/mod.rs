@@ -367,6 +367,7 @@ async fn post_email_event(
         tenant.community(),
         &root_hex,
         conversation.channel_id,
+        &state.relay_keypair.public_key().to_bytes(),
         state,
     )
     .await

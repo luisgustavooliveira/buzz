@@ -90,6 +90,23 @@ function threadComposer(page: Page) {
   return page.getByTestId("thread-composer-overlay");
 }
 
+/**
+ * Returns the thread composer's editor once the app has finished placing
+ * focus on its own. Opening a thread by URL mounts the channel and thread
+ * composers, and whichever mounts first autofocuses itself a frame later
+ * (TipTap's `focus()` is deferred). A click that lands before that frame is
+ * undone by the late autofocus, which blurs the editor the test just typed in
+ * and unmounts its focus-gated mention menu.
+ */
+async function readyThreadComposerInput(page: Page) {
+  const input = threadComposer(page).getByTestId("message-input");
+  await expect(input).toHaveAttribute("contenteditable", "true");
+  await expect(page.locator('[data-testid="message-input"]:focus')).toHaveCount(
+    1,
+  );
+  return input;
+}
+
 async function readComposerCaret(input: Locator) {
   return input.evaluate((element) => {
     const selection = window.getSelection();
@@ -534,7 +551,7 @@ test("primary+Shift+M favors the most recently mentioned eligible agent", async 
   await expect(input).toHaveText("@Vogue draft text");
 });
 
-test("the mention button opens settings and can undo an address", async ({
+test("the mention button preserves manual rementions after undo until explicitly readdressed", async ({
   page,
 }) => {
   await installAudienceFixtures(page);
@@ -601,25 +618,44 @@ test("the mention button opens settings and can undo an address", async ({
   await expect(
     composer.getByRole("button", { name: "Mention someone" }),
   ).toBeVisible();
-  await input.fill("");
+  const avatar = composer.getByTestId(`composer-address-lock-${AGENT_A}`);
+  // Observe the old address exit before testing the manual selection.
+  await expect(avatar).toHaveCount(0);
+  // Clear through editor transactions before selecting a manual mention.
+  await input.press("ControlOrMeta+A");
+  await input.press("Backspace");
+  await expect(input).toHaveText("");
 
   await menu
     .getByRole("button", { name: "Mention Morgarita", exact: true })
     .click();
   await expect(input).toHaveText("@Morgarita ");
-  await expect(
-    composer.getByTestId(`composer-address-lock-${AGENT_A}`),
-  ).toBeVisible();
+  // Explicitly opting out keeps subsequent mentions manual. The old avatar's
+  // exit animation must not be mistaken for a newly pinned recipient.
+  await expect(avatar).toHaveCount(0);
 
   await input.type("later");
   await input.press("Enter");
   await expect(input).toHaveText("");
   await expect
     .poll(() => readOutgoingMentionPubkeys(page, "@Morgarita later"))
-    .toContain(AGENT_A);
+    .toEqual([AGENT_A]);
   await expect(
     composer.getByTestId(`composer-address-lock-${AGENT_A}`),
   ).toHaveCount(0);
+
+  // Only the explicit automatic action reinstates the excluded address.
+  await automaticallyMention(composer, "Morgarita");
+  await expect(avatar).toBeVisible();
+  await input.type("explicit recovery");
+  await input.press("Enter");
+  await expect
+    .poll(() =>
+      readOutgoingMentionPubkeys(page, "@Morgarita explicit recovery"),
+    )
+    .toEqual([AGENT_A]);
+  await expect(input).toHaveText("@Morgarita ");
+  await expect(avatar).toBeVisible();
 });
 
 test("always-mentioned agents remain selected without replaying their animation while Enter-send resolves", async ({
@@ -814,7 +850,7 @@ test("the mention setting is reachable and operable by keyboard", async ({
   await openThread(page);
 
   const mainComposer = threadComposer(page);
-  const mainInput = mainComposer.getByTestId("message-input");
+  const mainInput = await readyThreadComposerInput(page);
   await mainInput.click();
   await mainInput.fill("@Mor");
   const list = mainComposer.getByTestId("mention-autocomplete");
@@ -915,7 +951,7 @@ test("a manual mention persists when automatic mentions are enabled", async ({
   await openThread(page);
 
   const composer = threadComposer(page);
-  const input = composer.getByTestId("message-input");
+  const input = await readyThreadComposerInput(page);
   await input.fill("@Mor");
   await expect(composer.getByTestId("mention-autocomplete")).toBeVisible();
   await input.press("Tab");
@@ -967,6 +1003,18 @@ test("a manual mention persists when automatic mentions are enabled", async ({
 
   await input.type("hello");
   await input.press("Enter");
+
+  // The editor locks one frame after Enter (isSending disables it, blurring
+  // it) and unlocks when the delayed send settles. Wait for that whole cycle
+  // before asserting on the editor; its focus and editability checks all hold
+  // vacuously in the frame before the lock lands.
+  const composerForm = composer.getByTestId("message-composer");
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "true");
+  await expect(input).toHaveAttribute("contenteditable", "false");
+  await expect(composerForm).toHaveAttribute("data-submit-locked", "false", {
+    timeout: 5_000,
+  });
+  await expect(input).toHaveAttribute("contenteditable", "true");
 
   await expect(input).toHaveText("@Morgarita ", { timeout: 2_500 });
   await expect(input.locator("[data-placeholder]")).toHaveCount(0);

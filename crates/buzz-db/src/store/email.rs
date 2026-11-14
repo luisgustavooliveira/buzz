@@ -5,7 +5,7 @@
 //! durable delivery request.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row, Transaction};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -434,23 +434,24 @@ pub async fn insert_event_with_email_outbox(
     channel_id: Option<Uuid>,
     thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     outbox: EmailOutboxInsert<'_>,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
 ) -> Result<(buzz_core::StoredEvent, bool)> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    tx.set_push_enqueue(push_enqueue);
     let (stored_event, was_inserted) = crate::event::insert_event_with_thread_metadata_tx(
         &mut tx,
-        community_id,
         event,
         channel_id,
         thread_meta,
     )
     .await?;
     if was_inserted {
-        crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+        crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         insert_email_outbox_tx(&mut tx, community_id, outbox).await?;
     }
     tx.commit().await?;
@@ -458,7 +459,7 @@ pub async fn insert_event_with_email_outbox(
 }
 
 async fn insert_email_outbox_tx(
-    tx: &mut Transaction<'_, sqlx::Postgres>,
+    tx: &mut crate::runtime::AdmittedTx,
     community_id: CommunityId,
     outbox: EmailOutboxInsert<'_>,
 ) -> Result<()> {
@@ -474,7 +475,7 @@ async fn insert_email_outbox_tx(
         .bind(conversation.channel_id)
         .bind(conversation.root_event_id)
         .bind(conversation.created_by)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
     }
     for participant in conversation.participants {
@@ -492,7 +493,7 @@ async fn insert_email_outbox_tx(
         .bind(&participant.role)
         .bind(&participant.agent_pubkey)
         .bind(&participant.approved_by)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
     }
     sqlx::query(
@@ -507,7 +508,7 @@ async fn insert_email_outbox_tx(
     .bind(outbox.author_pubkey)
     .bind(outbox.internet_message_id)
     .bind(outbox.payload)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
     Ok(())
 }
@@ -664,6 +665,7 @@ impl Db {
             channel_id,
             thread_meta,
             outbox,
+            self.push_enqueue.clone(),
         )
         .await
     }

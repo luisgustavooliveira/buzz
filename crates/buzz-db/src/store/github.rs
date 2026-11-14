@@ -18,7 +18,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, Row, Transaction};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -432,8 +432,8 @@ pub async fn get_thread_link_by_root(
 /// This is the transaction-composition seam for event ingest: the relay
 /// inserts the kind:9 event and its outbox row atomically (one action = one
 /// atomic persist). The caller owns commit or rollback. Returns the new row id.
-pub async fn insert_outbox_in_transaction(
-    tx: &mut Transaction<'_, Postgres>,
+pub(crate) async fn insert_outbox_in_transaction(
+    tx: &mut crate::runtime::AdmittedTx,
     params: GithubOutboxInsert<'_>,
 ) -> Result<Uuid> {
     let id = Uuid::new_v4();
@@ -454,7 +454,7 @@ pub async fn insert_outbox_in_transaction(
     .bind(params.event_id)
     .bind(params.author_pubkey)
     .bind(params.payload)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
 
     Ok(id)
@@ -464,7 +464,12 @@ pub async fn insert_outbox_in_transaction(
 /// also write the originating event must use [`insert_outbox_in_transaction`]
 /// instead so both writes commit atomically.
 pub async fn insert_outbox(pool: &PgPool, params: GithubOutboxInsert<'_>) -> Result<Uuid> {
-    let mut tx = pool.begin().await?;
+    let mut tx = crate::begin_community_write_transaction(
+        pool,
+        params.community_id,
+        crate::observability::WriterOperation::EventWrite,
+    )
+    .await?;
     let id = insert_outbox_in_transaction(&mut tx, params).await?;
     tx.commit().await?;
     Ok(id)
@@ -487,23 +492,24 @@ pub async fn insert_event_with_github_outbox(
     channel_id: Option<Uuid>,
     thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     outbox: GithubOutboxInsert<'_>,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
 ) -> Result<(buzz_core::StoredEvent, bool)> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
+    tx.set_push_enqueue(push_enqueue);
     let (stored_event, was_inserted) = crate::event::insert_event_with_thread_metadata_tx(
         &mut tx,
-        community_id,
         event,
         channel_id,
         thread_meta,
     )
     .await?;
     if was_inserted {
-        crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+        crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         insert_outbox_in_transaction(&mut tx, outbox).await?;
     }
     tx.commit().await?;
@@ -885,6 +891,7 @@ impl Db {
             channel_id,
             thread_meta,
             outbox,
+            self.push_enqueue.clone(),
         )
         .await
     }
@@ -959,10 +966,10 @@ mod tests {
 
     #[test]
     fn enum_db_spellings_match_migration_check_constraints() {
-        // The CHECK constraints in migrations/0045_github_bridge.sql enumerate
+        // The CHECK constraints in migrations/9001_github_bridge.sql enumerate
         // the same literals the Rust enums serialize to; drift here means rows
         // written by the relay violate the constraint at insert time.
-        let migration = include_str!("../../../../migrations/0045_github_bridge.sql");
+        let migration = include_str!("../../../../migrations/9001_github_bridge.sql");
         for sql_literal in ["'issue'", "'pr'"] {
             assert!(
                 migration.contains(sql_literal),

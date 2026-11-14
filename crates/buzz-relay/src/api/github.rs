@@ -52,12 +52,12 @@ pub(crate) fn verify_github_signature(secret: &[u8], header_value: &str, body: &
 /// `Ok(false)` = duplicate (skip), `Err` = Redis unavailable (fail closed so
 /// GitHub retries instead of double-processing).
 async fn mark_delivery_seen(
-    pool: &deadpool_redis::Pool,
+    pool: &buzz_pubsub::RedisConnection,
     community: buzz_core::CommunityId,
     delivery: &str,
 ) -> Result<bool, String> {
     let key = format!("github:webhook:delivery:{}:{delivery}", community.as_uuid());
-    let mut conn = pool.get().await.map_err(|e| format!("redis get: {e}"))?;
+    let mut conn = pool.clone();
     // SET key 1 NX EX <ttl>: Some("OK") on first claim, None when seen.
     let result: Option<String> = redis::cmd("SET")
         .arg(&key)
@@ -65,7 +65,7 @@ async fn mark_delivery_seen(
         .arg("NX")
         .arg("EX")
         .arg(DELIVERY_DEDUP_TTL_SECS)
-        .query_async(&mut *conn)
+        .query_async(&mut conn)
         .await
         .map_err(|e| format!("redis SET NX EX: {e}"))?;
     match result.as_deref() {

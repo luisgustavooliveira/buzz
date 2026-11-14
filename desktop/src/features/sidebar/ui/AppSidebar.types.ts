@@ -48,6 +48,7 @@ export type AppSidebarProps = {
     | "projects";
   unreadChannelCounts: ReadonlyMap<string, number>;
   unreadChannelIds: ReadonlySet<string>;
+  highPriorityUnreadChannelIds: ReadonlySet<string>;
   previewActivityChannelIds: ReadonlySet<string>;
   communities: Community[];
   onAddCommunity: (community: Community) => void;
@@ -81,7 +82,8 @@ export type AppSidebarProps = {
     id: string,
     updates: Partial<Pick<Community, "name" | "relayUrl" | "token">>,
   ) => void;
-  onRemoveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
+  onLeaveCommunity: (id: string) => Promise<LeaveCommunityResult | undefined>;
+  onRemoveCommunityFromDevice: (id: string) => Promise<void>;
   onCreateAgent: () => void;
   onSelectAgents: () => void;
   onSelectProjects: () => void;

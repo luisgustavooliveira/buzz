@@ -75,7 +75,7 @@ failure is logged and exported as a metric.
 
 ## Persistence and delivery
 
-Migration `0046_email_bridge.sql` adds conversations, participants, messages,
+Migration `9002_email_bridge.sql` adds conversations, participants, messages,
 outbox and quarantine. The outbound event and its outbox row commit in one
 transaction. SMTP delivery is at-least-once with a persistent random Message-ID,
 bounded exponential retry and a visible terminal failure note.
