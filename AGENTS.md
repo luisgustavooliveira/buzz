@@ -878,3 +878,16 @@ persistent automatic addresses. Use the returned label from registration for
 insert/restore/remove. Ambiguous manually typed names must fail visibly without
 clearing the draft in chat, edit, and standalone forum consumers; never fan out
 silently to all identities sharing a name. See `docs/mention-editor.md`.
+
+---
+
+## SNPS fork: build and test only in CI
+
+On the SNPS operator host (`ansible01`), do **not** run `cargo`
+(build/check/test/clippy), `just ci`/`just test`, Tauri builds or the lefthook
+hooks that invoke them: a workspace `cargo check` froze the host on
+2026-11-14. Commit and push with `--no-verify`, then validate in GitHub
+Actions: open a **draft PR inside the fork** (`luisgustavooliveira/buzz`, never
+against `block/buzz`) to run `ci.yml`. Light, single-file checks (`node --test`
+on one file) are fine. Canonical rule: `Infra/AGENTS.md` › "Builds e
+compilação pesada".
