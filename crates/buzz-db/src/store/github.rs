@@ -1112,6 +1112,7 @@ mod tests {
             let community_uuid = *community_id.as_uuid();
 
             let keys = nostr::Keys::generate();
+            let mentioned = nostr::Keys::generate();
             let root_hex = root.event.id.to_hex();
             let reply = nostr::EventBuilder::new(
                 nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
@@ -1120,7 +1121,8 @@ mod tests {
             .tags([
                 nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
                 nostr::Tag::parse(["e", &root_hex, "", "reply"]).expect("reply e tag"),
-                nostr::Tag::parse(["p", &keys.public_key().to_hex()]).expect("p tag"),
+                // nostr's EventBuilder strips self p-tags; mention someone else.
+                nostr::Tag::parse(["p", &mentioned.public_key().to_hex()]).expect("p tag"),
             ])
             .sign_with_keys(&keys)
             .expect("sign reply");
