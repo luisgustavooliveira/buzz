@@ -1088,11 +1088,13 @@ mod tests {
             // Nothing cascades from communities: purge every scoped table in
             // deletion's FK-safe order, then the community itself.
             for table in crate::store::deletion::PURGE_SCOPED_TABLES {
-                sqlx::query(&format!("DELETE FROM {table} WHERE community_id = $1"))
-                    .bind(community_uuid)
-                    .execute(pool)
-                    .await
-                    .expect("clean scoped table");
+                sqlx::query(sqlx::AssertSqlSafe(format!(
+                    "DELETE FROM {table} WHERE community_id = $1"
+                )))
+                .bind(community_uuid)
+                .execute(pool)
+                .await
+                .expect("clean scoped table");
             }
             sqlx::query("DELETE FROM communities WHERE id = $1")
                 .bind(community_uuid)
