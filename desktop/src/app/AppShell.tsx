@@ -9,6 +9,7 @@ import { AppShellOverlays, TerminalBootstrap } from "@/app/AppShellOverlays";
 import { AppShellChannelSurface } from "@/app/AppShellChannelSurface";
 import { AppHuddleShell } from "@/app/AppHuddleShell";
 import { AppTopChrome } from "@/app/AppTopChrome";
+import { DeprecationBanner } from "@/app/DeprecationBanner";
 import {
   type TerminalContextOverride,
   TerminalContextOverrideProvider,
@@ -163,7 +164,8 @@ export function AppShell() {
     [location.pathname],
   );
   const {
-    removeCommunity: handleRemoveCommunity,
+    leaveAndRemoveCommunity: handleLeaveCommunity,
+    removeCommunityFromDevice: removeFromDevice,
     switchCommunity: handleSwitchCommunity,
   } = useCommunityNavigationTransitions({
     communities: communitiesHook,
@@ -173,8 +175,17 @@ export function AppShell() {
   });
   // Settings lives in history so back returns to the previous app entry.
   const settingsOpen = location.pathname === "/settings";
-  const locationSearchSection = (location.search as { section?: unknown })
+  const rawLocationSearchSection = (location.search as { section?: unknown })
     .section;
+  // Migrate the legacy "moderation" token to "relay-admin" (renamed section
+  // id). useLocation().search is the raw URL query, bypassing route validation,
+  // so the alias must be applied here too. The "doctor" alias is NOT needed on
+  // this path: AppShell never carried it on main, and it lives only in
+  // validateSettingsSearch where route validation rewrites it before rendering.
+  const locationSearchSection =
+    rawLocationSearchSection === "moderation"
+      ? "relay-admin"
+      : rawLocationSearchSection;
   const settingsSection: SettingsSection = isSettingsSection(
     locationSearchSection,
   )
@@ -196,7 +207,7 @@ export function AppShell() {
   );
   useAgentsDataRefresh();
   // Chunk F: auto-restart drifted idle agents (per-agent opt-out, default ON).
-  useAutoRestartPolicy();
+  useAutoRestartPolicy(communitiesHook.activeCommunity?.relayUrl);
   // Owner-global observer ingestion: receives + decrypts agent observer
   // frames and keeps derived active-turn liveness in sync app-wide, so no
   // individual screen/panel has to mount its own bridge for ingestion.
@@ -383,7 +394,6 @@ export function AppShell() {
     setContextParentResolver,
     participatedRootIds,
     authoredRootIds,
-    mentionedRootIds,
     recordThreadInteraction,
     threadActivityItems,
     mutedRootIds,
@@ -476,15 +486,8 @@ export function AppShell() {
       !mutedRootIds.has(rootId) &&
       (followedRootIds.has(rootId) ||
         participatedRootIds.has(rootId) ||
-        authoredRootIds.has(rootId) ||
-        mentionedRootIds.has(rootId)),
-    [
-      followedRootIds,
-      mutedRootIds,
-      participatedRootIds,
-      authoredRootIds,
-      mentionedRootIds,
-    ],
+        authoredRootIds.has(rootId)),
+    [followedRootIds, mutedRootIds, participatedRootIds, authoredRootIds],
   );
 
   const handleFollowThread = React.useCallback(
@@ -783,6 +786,7 @@ export function AppShell() {
                       onGoForward={goForward}
                     />
                   ) : null}
+                  {!isHuddleRoom ? <DeprecationBanner /> : null}
                   {settingsOpen ? (
                     <div className="flex min-h-0 flex-1 overflow-hidden">
                       <React.Suspense fallback={null}>
@@ -859,7 +863,8 @@ export function AppShell() {
                           onOpenAddCommunity={addCommunityDialog.openDialog}
                           onSendFeedback={() => setIsSendFeedbackOpen(true)}
                           onUpdateCommunity={communitiesHook.updateCommunity}
-                          onRemoveCommunity={handleRemoveCommunity}
+                          onLeaveCommunity={handleLeaveCommunity}
+                          onRemoveCommunityFromDevice={removeFromDevice}
                           onSwitchCommunity={handleSwitchCommunity}
                           onCreateAgent={() => requestOpenCreateAgent()}
                           selfPresenceStatus={presenceSession.currentStatus}
@@ -918,6 +923,7 @@ export function AppShell() {
                           selectedChannelId={selectedChannelId}
                           selectedView={selectedView}
                           unreadChannelIds={unreadChannelIds}
+                          {...{ highPriorityUnreadChannelIds }}
                           previewActivityChannelIds={unreadThreadChannelIds}
                           unreadChannelCounts={unreadChannelCounts}
                           mutedChannelIds={mutedChannelIds}

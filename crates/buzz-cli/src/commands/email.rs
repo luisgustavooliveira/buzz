@@ -130,7 +130,7 @@ pub async fn cmd_email_send(client: &BuzzClient, p: EmailSendParams) -> Result<(
     let builder =
         buzz_sdk::build_message(channel, &body, thread_ref.as_ref(), &[], false, &[], &[])
             .map_err(sdk_err)?;
-    let event = client.sign_event(attach_tags(builder, &tags)?)?;
+    let event = client.sign_event(attach_tags(builder, &tags)?).await?;
     let response = client.submit_event(event).await?;
     println!("{}", normalize_write_response(&response));
     Ok(())

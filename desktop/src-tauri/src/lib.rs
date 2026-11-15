@@ -10,6 +10,8 @@ mod deep_link;
 mod egress_guard;
 mod event_sync;
 mod events;
+#[cfg_attr(not(test), allow(dead_code))]
+mod hpke_key_backup;
 mod huddle;
 mod identity_storage;
 mod initial_window;
@@ -223,6 +225,7 @@ pub fn run() {
         })
         .manage(build_app_state())
         .manage(ClipboardState::new())
+        .manage(InstallerDownloads::default())
         .manage(PendingCommunityDeepLinks::default())
         .manage(PendingNavigationDeepLinks::default())
         .manage(PendingEntityDeepLinks::default())
@@ -236,11 +239,16 @@ pub fn run() {
         .manage(channel_head_cache::ChannelHeadCacheStore::default())
         .setup(move |app| {
             let app_handle = app.handle().clone();
+            recover_new_app_installer_downloads(&app_handle);
             #[cfg(target_os = "macos")]
             {
                 tray_menu::init(&app_handle)?;
                 macos_notifications::init(&app_handle)?;
             }
+
+            // Initialise the no-redirect admin HTTP client singleton before any
+            // admin command can be invoked. Must run before setup completes.
+            commands::admin::client::init_admin_client()?;
 
             // ── Phase 2: boot-time sentinel wipe ──────────────────────────────
             // Must run before migrations and identity resolution so the wipe
@@ -600,6 +608,8 @@ pub fn run() {
             get_relay_http_url,
             get_media_proxy_port,
             fetch_link_preview_metadata,
+            cancel_link_preview_metadata,
+            release_link_preview_metadata,
             discover_acp_auth_methods,
             discover_acp_providers,
             discover_git_bash_prerequisite,
@@ -640,6 +650,7 @@ pub fn run() {
             join_channel,
             leave_channel,
             get_canvas,
+            get_canvas_history,
             set_canvas,
             get_feed,
             search_messages,
@@ -706,7 +717,6 @@ pub fn run() {
             start_managed_agent,
             stop_managed_agent,
             set_agent_managed_profiles,
-            set_thread_scoped_acp_sessions,
             set_managed_agent_start_on_app_launch,
             set_managed_agent_auto_restart,
             delete_managed_agent,
@@ -728,6 +738,7 @@ pub fn run() {
             mesh_installed_models,
             mesh_model_catalog,
             update_managed_agent,
+            discover_acp_commands,
             discover_backend_providers,
             probe_backend_provider,
             persona_catalog::fetch_persona_catalog,
@@ -833,9 +844,13 @@ pub fn run() {
             confirm_pairing_sas,
             cancel_pairing,
             apply_workspace,
+            remove_community_relay,
+            readd_community_relay,
+            set_agent_avatar_communities,
             validate_repos_dir,
             get_active_workspace,
             fetch_workspace_icon,
+            fetch_relay_entry_requirements,
             fetch_join_policy,
             set_prevent_sleep_active,
             get_agent_memory,
@@ -861,6 +876,10 @@ pub fn run() {
             archive::sync::start_archive_sync,
             archive::sync::stop_archive_sync,
             is_auto_update_supported,
+            new_app_installer_target,
+            download_new_app_installer,
+            cancel_new_app_installer_download,
+            reveal_new_app_installer,
             set_window_vibrancy,
             #[cfg(target_os = "macos")]
             tray_menu::clear_tray_agent_activity,
@@ -870,6 +889,32 @@ pub fn run() {
             tray_menu::take_tray_actions,
             #[cfg(target_os = "macos")]
             tray_menu::update_tray_agent_activity,
+            // ── Desktop admin surface ────────────────────────────────────────
+            admin_probe,
+            admin_list_reports,
+            admin_get_report,
+            admin_list_feedback,
+            admin_get_feedback,
+            admin_fetch_feedback_attachment,
+            admin_save_attachment,
+            admin_resolve_report,
+            admin_reopen_report,
+            admin_cancel_report,
+            admin_patch_feedback,
+            admin_list_operators,
+            admin_put_operator,
+            admin_delete_operator,
+            admin_list_restrictions,
+            admin_lift_restriction,
+            admin_list_communities,
+            admin_search_members,
+            admin_get_member,
+            admin_get_event,
+            admin_connected_community_host,
+            admin_direct_action,
+            get_admin_origin,
+            set_admin_origin,
+            admin_discover_origin,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -890,6 +935,7 @@ pub fn run() {
             ..
         } if label == "main" => {
             // Keep the webview alive so Buzz can be reopened from its tray menu.
+            // An installer download keeps running; its dialog is there on reopen.
             api.prevent_close();
             if let Some(window) = app_handle.get_webview_window("main") {
                 if let Err(error) = window.hide() {
@@ -920,6 +966,12 @@ pub fn run() {
                 }
             }
         }
+        // The main webview is gone, and with it the installer download's dialog.
+        RunEvent::WindowEvent {
+            label,
+            event: WindowEvent::Destroyed,
+            ..
+        } if label == "main" => app_handle.state::<InstallerDownloads>().cancel(),
         RunEvent::ExitRequested { code, .. } => {
             if is_restart_request(code) {
                 restart_requested.store(true, Ordering::SeqCst);

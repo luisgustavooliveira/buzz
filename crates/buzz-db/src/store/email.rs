@@ -5,7 +5,7 @@
 //! durable delivery request.
 
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Row, Transaction};
+use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
 use buzz_core::CommunityId;
@@ -427,30 +427,27 @@ pub async fn record_quarantine(
 
 /// Atomically persist an event, its thread/mentions, conversation,
 /// participants and outbound delivery request.
-pub async fn insert_event_with_email_outbox(
+pub(crate) async fn insert_event_with_email_outbox(
     pool: &PgPool,
     community_id: CommunityId,
     event: &nostr::Event,
     channel_id: Option<Uuid>,
     thread_meta: Option<crate::event::ThreadMetadataParams<'_>>,
     outbox: EmailOutboxInsert<'_>,
+    push_enqueue: Option<crate::runtime::push_enqueue::PushEnqueue>,
 ) -> Result<(buzz_core::StoredEvent, bool)> {
-    let connection = crate::observability::acquire_writer(
+    let mut tx = crate::begin_community_event_write_transaction(
         pool,
+        community_id,
         crate::observability::WriterOperation::EventWrite,
     )
     .await?;
-    let mut tx = sqlx::Transaction::begin(connection, None).await?;
-    let (stored_event, was_inserted) = crate::event::insert_event_with_thread_metadata_tx(
-        &mut tx,
-        community_id,
-        event,
-        channel_id,
-        thread_meta,
-    )
-    .await?;
+    tx.set_push_enqueue(push_enqueue);
+    let (stored_event, was_inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta)
+            .await?;
     if was_inserted {
-        crate::insert_mentions_in_transaction(&mut tx, community_id, event, channel_id).await?;
+        crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         insert_email_outbox_tx(&mut tx, community_id, outbox).await?;
     }
     tx.commit().await?;
@@ -458,7 +455,7 @@ pub async fn insert_event_with_email_outbox(
 }
 
 async fn insert_email_outbox_tx(
-    tx: &mut Transaction<'_, sqlx::Postgres>,
+    tx: &mut crate::runtime::AdmittedTx,
     community_id: CommunityId,
     outbox: EmailOutboxInsert<'_>,
 ) -> Result<()> {
@@ -474,7 +471,7 @@ async fn insert_email_outbox_tx(
         .bind(conversation.channel_id)
         .bind(conversation.root_event_id)
         .bind(conversation.created_by)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
     }
     for participant in conversation.participants {
@@ -492,7 +489,7 @@ async fn insert_email_outbox_tx(
         .bind(&participant.role)
         .bind(&participant.agent_pubkey)
         .bind(&participant.approved_by)
-        .execute(&mut **tx)
+        .execute(tx.conn())
         .await?;
     }
     sqlx::query(
@@ -507,7 +504,7 @@ async fn insert_email_outbox_tx(
     .bind(outbox.author_pubkey)
     .bind(outbox.internet_message_id)
     .bind(outbox.payload)
-    .execute(&mut **tx)
+    .execute(tx.conn())
     .await?;
     Ok(())
 }
@@ -664,6 +661,7 @@ impl Db {
             channel_id,
             thread_meta,
             outbox,
+            self.push_enqueue.clone(),
         )
         .await
     }
@@ -811,11 +809,11 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires Postgres with migration 0046"]
+    #[ignore = "requires Postgres with migration 9002"]
     async fn event_conversation_participants_and_outbox_are_atomic_and_idempotent() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)
@@ -831,10 +829,10 @@ mod tests {
             .expect("insert community");
         let community_id = CommunityId::from_uuid(community_uuid);
         let channel_id = Uuid::new_v4();
-        let author = vec![0x42; 32];
+        let author: Vec<u8> = vec![0x42; 32];
         sqlx::query(
             r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
-               VALUES ($1, $2, 'email-test', 'standard', 'open', $3)"#,
+               VALUES ($1, $2, 'email-test', 'stream', 'open', $3)"#,
         )
         .bind(channel_id)
         .bind(community_uuid)
@@ -882,6 +880,7 @@ mod tests {
             Some(channel_id),
             None,
             insert,
+            None,
         )
         .await
         .expect("atomic insert");
@@ -906,6 +905,7 @@ mod tests {
                 internet_message_id: message_id,
                 payload: &payload,
             },
+            None,
         )
         .await
         .expect("duplicate insert");
@@ -918,26 +918,16 @@ mod tests {
                 .expect("count outbox");
         assert_eq!(count, 1);
 
-        for table in [
-            "email_outbox",
-            "email_messages",
-            "email_participants",
-            "email_conversations",
-            "email_quarantine",
-        ] {
-            let sql = match table {
-                "email_outbox" => "DELETE FROM email_outbox WHERE community_id = $1",
-                "email_messages" => "DELETE FROM email_messages WHERE community_id = $1",
-                "email_participants" => "DELETE FROM email_participants WHERE community_id = $1",
-                "email_conversations" => "DELETE FROM email_conversations WHERE community_id = $1",
-                "email_quarantine" => "DELETE FROM email_quarantine WHERE community_id = $1",
-                _ => unreachable!("fixed cleanup table list"),
-            };
-            sqlx::query(sql)
-                .bind(community_uuid)
-                .execute(&pool)
-                .await
-                .expect("clean email table");
+        // Nothing cascades from communities: purge every scoped table in
+        // deletion's FK-safe order, then the community itself.
+        for table in crate::store::deletion::PURGE_SCOPED_TABLES {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DELETE FROM {table} WHERE community_id = $1"
+            )))
+            .bind(community_uuid)
+            .execute(&pool)
+            .await
+            .expect("clean scoped table");
         }
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community_uuid)

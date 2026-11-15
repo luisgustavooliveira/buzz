@@ -244,6 +244,7 @@ pub(crate) async fn post_bridge_message(
                 tenant.community(),
                 parent_hex,
                 channel_id,
+                &state.relay_keypair.public_key().to_bytes(),
                 state,
             )
             .await

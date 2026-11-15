@@ -1,3 +1,4 @@
+pub mod admin;
 mod agent_access;
 mod agent_auth;
 mod agent_config;
@@ -44,6 +45,7 @@ pub(crate) mod mesh_llm;
 #[cfg(feature = "mesh-llm")]
 pub(crate) mod mesh_readiness;
 mod messages;
+mod new_app_installer;
 mod notifications;
 mod observer_archive;
 mod os_idle;
@@ -64,6 +66,7 @@ mod project_git_workflow;
 mod project_repo_paths;
 mod project_terminal;
 mod qr_download;
+mod relay_entry_requirements;
 mod relay_members;
 mod relay_reconnect;
 mod social;
@@ -75,6 +78,7 @@ mod window_vibrancy;
 mod workflows;
 mod workspace;
 
+pub use admin::*;
 pub use agent_access::*;
 pub use agent_auth::*;
 pub use agent_config::*;
@@ -107,6 +111,7 @@ pub use media_raw::*;
 #[cfg(feature = "mesh-llm")]
 pub use mesh_llm::*;
 pub use messages::*;
+pub use new_app_installer::*;
 pub use notifications::*;
 pub use observer_archive::*;
 pub use os_idle::*;
@@ -122,6 +127,7 @@ pub use project_git_recipient_notes::*;
 pub use project_git_workflow::*;
 pub use project_terminal::*;
 pub use qr_download::*;
+pub use relay_entry_requirements::*;
 pub use relay_members::*;
 pub use relay_reconnect::*;
 pub use social::*;

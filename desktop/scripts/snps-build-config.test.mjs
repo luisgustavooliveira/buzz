@@ -28,10 +28,9 @@ test("SNPS package disables upstream updates and installs per user", () => {
     config.tauriConfig.bundle.windows.nsis.installMode,
     "currentUser",
   );
-  assert.deepEqual(
-    config.tauriConfig.plugins["deep-link"].desktop.schemes,
-    [config.deepLinkScheme],
-  );
+  assert.deepEqual(config.tauriConfig.plugins["deep-link"].desktop.schemes, [
+    config.deepLinkScheme,
+  ]);
 });
 
 test("SNPS agents and clients land on the corporate relay", () => {

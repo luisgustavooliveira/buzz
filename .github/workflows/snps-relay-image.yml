@@ -1,0 +1,77 @@
+name: SNPS Relay Image
+
+# Builds the SNPS fork's relay image (upstream Dockerfile, `runtime` target)
+# and hands it over as a `docker save` artifact. The fork cannot push to GHCR,
+# and the SNPS operator publishes it to the internal registry (ProGet) from the
+# artifact, so no registry credential lives in GitHub.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/github-bridge"]
+    paths:
+      - ".github/workflows/snps-relay-image.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "Dockerfile"
+      - "crates/**"
+      - "migrations/**"
+      - "rust-toolchain.toml"
+      - "schema/**"
+      - "web/**"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build relay image (linux/amd64)
+    if: github.repository == 'luisgustavooliveira/buzz'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Resolve image tag
+        id: tag
+        shell: bash
+        run: echo "tag=snps-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+
+      - name: Build runtime image
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: ./Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: false
+          tags: buzz-relay:${{ steps.tag.outputs.tag }}
+          outputs: type=docker,dest=${{ runner.temp }}/buzz-relay.tar
+          build-args: |
+            BUZZ_SOURCE_SHA=${{ github.sha }}
+            BUZZ_BUILD_ID=github-actions:${{ github.run_id }}:${{ github.run_attempt }}
+            BUZZ_BUILD_URL=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+          cache-from: type=gha,scope=snps-relay
+          cache-to: type=gha,scope=snps-relay,mode=max
+
+      - name: Compress and checksum
+        shell: bash
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gzip -c "$RUNNER_TEMP/buzz-relay.tar" > "dist/buzz-relay-${TAG}.tar.gz"
+          node -e 'require("node:fs").writeFileSync("dist/BUILD-INFO.json", JSON.stringify({tag: process.env.TAG, source_sha: process.env.GITHUB_SHA, run_id: process.env.GITHUB_RUN_ID}, null, 2) + "\n")'
+          cd dist && sha256sum ./* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-relay-image-${{ steps.tag.outputs.tag }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 30
