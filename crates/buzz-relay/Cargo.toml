@@ -70,7 +70,9 @@ reqwest = { workspace = true }
 base64 = "0.22"
 buzz-sdk = { workspace = true }
 buzz-workflow = { workspace = true, features = ["reqwest"] }
-lettre = "0.11"
+# rustls + native roots (same CA store native-tls used) keeps OpenSSL out of
+# the musl server builds; ring matches the provider main() installs.
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "pool", "hostname", "builder", "rustls", "ring", "rustls-native-certs"] }
 buzz-media = { workspace = true }
 s3 = { version = "0.37", package = "rust-s3", default-features = false, features = ["tokio-rustls-tls", "fail-on-err", "tags"] }
 tempfile = "3"

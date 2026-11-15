@@ -427,7 +427,7 @@ pub async fn record_quarantine(
 
 /// Atomically persist an event, its thread/mentions, conversation,
 /// participants and outbound delivery request.
-pub async fn insert_event_with_email_outbox(
+pub(crate) async fn insert_event_with_email_outbox(
     pool: &PgPool,
     community_id: CommunityId,
     event: &nostr::Event,
@@ -880,6 +880,7 @@ mod postgres_tests {
             Some(channel_id),
             None,
             insert,
+            None,
         )
         .await
         .expect("atomic insert");
@@ -904,6 +905,7 @@ mod postgres_tests {
                 internet_message_id: message_id,
                 payload: &payload,
             },
+            None,
         )
         .await
         .expect("duplicate insert");

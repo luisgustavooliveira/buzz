@@ -43,9 +43,6 @@ if (
     process.exit(2);
   }
   const config = snpsBuildConfig();
-  writeFileSync(
-    outputPath,
-    `${JSON.stringify(config.tauriConfig, null, 2)}\n`,
-  );
+  writeFileSync(outputPath, `${JSON.stringify(config.tauriConfig, null, 2)}\n`);
   console.log(JSON.stringify(config));
 }

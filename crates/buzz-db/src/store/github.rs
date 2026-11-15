@@ -485,7 +485,7 @@ pub async fn insert_outbox(pool: &PgPool, params: GithubOutboxInsert<'_>) -> Res
 /// a second outbound comment.
 ///
 /// Returns `(StoredEvent, was_inserted)`.
-pub async fn insert_event_with_github_outbox(
+pub(crate) async fn insert_event_with_github_outbox(
     pool: &PgPool,
     community_id: CommunityId,
     event: &nostr::Event,
@@ -1155,6 +1155,7 @@ mod tests {
                 Some(channel_id),
                 Some(thread_meta),
                 params,
+                None,
             )
             .await
             .expect("combined insert");
@@ -1196,6 +1197,7 @@ mod tests {
                 Some(channel_id),
                 None,
                 params2,
+                None,
             )
             .await
             .expect("duplicate combined insert must not error");

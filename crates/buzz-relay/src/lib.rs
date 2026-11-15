@@ -44,12 +44,12 @@ pub mod connection;
 pub mod email_bridge;
 /// Relay error types.
 pub mod error;
+/// The feature-flag provider, chosen once at startup.
+pub mod feature_flags;
 /// GitHub bridge core: inbound webhook routing, outbound outbox worker, and
 /// the atomic ingest hook (config-gated; inert when `BUZZ_GITHUB_ENABLED` is
 /// unset).
 pub mod github_bridge;
-/// The feature-flag provider, chosen once at startup.
-pub mod feature_flags;
 /// WebSocket message handlers for NIP-01 client commands.
 pub mod handlers;
 /// Stateless HMAC-signed relay invite tokens (mint/verify).

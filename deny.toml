@@ -77,6 +77,9 @@ allow = [
     "Zlib",
     "OpenSSL",
     "CC0-1.0",
+    # SNPS fork: quoted_printable (via lettre, email bridge). OSI-approved,
+    # more permissive than MIT.
+    "0BSD",
     "CDLA-Permissive-2.0",
     "MITNFA",
     "MPL-2.0",
