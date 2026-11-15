@@ -832,7 +832,7 @@ mod postgres_tests {
         let author = vec![0x42; 32];
         sqlx::query(
             r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
-               VALUES ($1, $2, 'email-test', 'standard', 'open', $3)"#,
+               VALUES ($1, $2, 'email-test', 'stream', 'open', $3)"#,
         )
         .bind(channel_id)
         .bind(community_uuid)

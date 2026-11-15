@@ -4608,6 +4608,17 @@ mod postgres_tests {
         (db, store)
     }
 
+    /// Bridge tables the SNPS fork's 9001/9002 migrations fence in production.
+    const SNPS_FORK_FENCED_TABLES: [&str; 7] = [
+        "email_conversations",
+        "email_messages",
+        "email_outbox",
+        "email_participants",
+        "email_quarantine",
+        "github_outbox",
+        "github_thread_links",
+    ];
+
     #[tokio::test]
     #[ignore = "requires Postgres"]
     async fn migration_schema_fence_objects_are_optional_for_serving_and_deletion() {
@@ -4623,7 +4634,10 @@ mod postgres_tests {
             .await
             .expect("migrate with fence objects present");
         let store = db.deletion_store();
-        let legacy_fenced_tables = store.live_fenced_tables().await.expect("legacy fences");
+        let mut legacy_fenced_tables = store.live_fenced_tables().await.expect("legacy fences");
+        // SNPS fork migrations (>= 9000) shipped their bridge tables fenced
+        // before the upstream no-new-fence rule; they are legacy fences too.
+        legacy_fenced_tables.extend(SNPS_FORK_FENCED_TABLES.map(str::to_owned));
         // Include current tables without requiring new application-admitted
         // tables to acquire legacy database fence triggers.
         db.migrate()
@@ -4640,6 +4654,13 @@ mod postgres_tests {
                 // will; this change itself ships no schema changes.
                 sqlx::raw_sql(r#"
 DROP TRIGGER IF EXISTS community_write_fence_api_tokens ON api_tokens;
+DROP TRIGGER IF EXISTS community_write_fence_email_conversations ON email_conversations;
+DROP TRIGGER IF EXISTS community_write_fence_email_messages ON email_messages;
+DROP TRIGGER IF EXISTS community_write_fence_email_outbox ON email_outbox;
+DROP TRIGGER IF EXISTS community_write_fence_email_participants ON email_participants;
+DROP TRIGGER IF EXISTS community_write_fence_email_quarantine ON email_quarantine;
+DROP TRIGGER IF EXISTS community_write_fence_github_outbox ON github_outbox;
+DROP TRIGGER IF EXISTS community_write_fence_github_thread_links ON github_thread_links;
 DROP TRIGGER IF EXISTS community_write_fence_archived_identities ON archived_identities;
 DROP TRIGGER IF EXISTS community_write_fence_artifact_heads ON artifact_heads;
 DROP TRIGGER IF EXISTS community_write_fence_artifact_revisions ON artifact_revisions;

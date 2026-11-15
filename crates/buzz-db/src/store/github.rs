@@ -1040,7 +1040,7 @@ mod tests {
                 r#"
                 INSERT INTO channels
                     (id, community_id, name, channel_type, visibility, created_by)
-                VALUES ($1, $2, 'github-test', 'standard', 'open', $3)
+                VALUES ($1, $2, 'github-test', 'stream', 'open', $3)
                 "#,
             )
             .bind(channel_id)
