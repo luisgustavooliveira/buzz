@@ -443,13 +443,9 @@ pub async fn insert_event_with_email_outbox(
     )
     .await?;
     tx.set_push_enqueue(push_enqueue);
-    let (stored_event, was_inserted) = crate::event::insert_event_with_thread_metadata_tx(
-        &mut tx,
-        event,
-        channel_id,
-        thread_meta,
-    )
-    .await?;
+    let (stored_event, was_inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta)
+            .await?;
     if was_inserted {
         crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         insert_email_outbox_tx(&mut tx, community_id, outbox).await?;
@@ -813,11 +809,11 @@ impl Db {
 }
 
 #[cfg(test)]
-mod tests {
+mod postgres_tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore = "requires Postgres with migration 0046"]
+    #[ignore = "requires Postgres with migration 9002"]
     async fn event_conversation_participants_and_outbox_are_atomic_and_idempotent() {
         let pool = sqlx::postgres::PgPoolOptions::new()
             .max_connections(2)

@@ -501,13 +501,9 @@ pub async fn insert_event_with_github_outbox(
     )
     .await?;
     tx.set_push_enqueue(push_enqueue);
-    let (stored_event, was_inserted) = crate::event::insert_event_with_thread_metadata_tx(
-        &mut tx,
-        event,
-        channel_id,
-        thread_meta,
-    )
-    .await?;
+    let (stored_event, was_inserted) =
+        crate::event::insert_event_with_thread_metadata_tx(&mut tx, event, channel_id, thread_meta)
+            .await?;
     if was_inserted {
         crate::insert_mentions_in_transaction(&mut tx, event, channel_id).await?;
         insert_outbox_in_transaction(&mut tx, outbox).await?;
@@ -1014,220 +1010,225 @@ mod tests {
 
     // -- Postgres-backed tests (ignored unless a database is available) --------
 
-    /// Minimal fixture: a community, a channel, a stored top-level kind:9 root
-    /// event, and a thread link pointing at that root. Returns
-    /// `(pool, community, channel, root_event)`.
-    async fn github_test_fixture() -> (sqlx::PgPool, CommunityId, Uuid, buzz_core::StoredEvent) {
-        let database_url = crate::test_support::database_url();
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&database_url)
-            .await
-            .expect("connect github bridge test pool");
+    mod postgres_tests {
+        use super::*;
 
-        let community_uuid = Uuid::new_v4();
-        sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+        /// Minimal fixture: a community, a channel, a stored top-level kind:9 root
+        /// event, and a thread link pointing at that root. Returns
+        /// `(pool, community, channel, root_event)`.
+        async fn github_test_fixture() -> (sqlx::PgPool, CommunityId, Uuid, buzz_core::StoredEvent)
+        {
+            let database_url = crate::test_support::database_url();
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&database_url)
+                .await
+                .expect("connect github bridge test pool");
+
+            let community_uuid = Uuid::new_v4();
+            sqlx::query("INSERT INTO communities (id, host) VALUES ($1, $2)")
+                .bind(community_uuid)
+                .bind(format!("github-bridge-{community_uuid}.example"))
+                .execute(&pool)
+                .await
+                .expect("insert test community");
+            let community_id = CommunityId::from_uuid(community_uuid);
+
+            let channel_id = Uuid::new_v4();
+            let creator: Vec<u8> = vec![0x42; 32];
+            sqlx::query(
+                r#"
+                INSERT INTO channels
+                    (id, community_id, name, channel_type, visibility, created_by)
+                VALUES ($1, $2, 'github-test', 'standard', 'open', $3)
+                "#,
+            )
+            .bind(channel_id)
             .bind(community_uuid)
-            .bind(format!("github-bridge-{community_uuid}.example"))
+            .bind(&creator)
             .execute(&pool)
             .await
-            .expect("insert test community");
-        let community_id = CommunityId::from_uuid(community_uuid);
+            .expect("insert test channel");
 
-        let channel_id = Uuid::new_v4();
-        let creator: Vec<u8> = vec![0x42; 32];
-        sqlx::query(
-            r#"
-            INSERT INTO channels
-                (id, community_id, name, channel_type, visibility, created_by)
-            VALUES ($1, $2, 'github-test', 'standard', 'open', $3)
-            "#,
-        )
-        .bind(channel_id)
-        .bind(community_uuid)
-        .bind(&creator)
-        .execute(&pool)
-        .await
-        .expect("insert test channel");
-
-        let keys = nostr::Keys::generate();
-        let root_event = nostr::EventBuilder::new(
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
-            "root",
-        )
-        .tags([nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
-        .sign_with_keys(&keys)
-        .expect("sign root");
-        let root_stored = crate::event::insert_event_with_thread_metadata(
-            &pool,
-            community_id,
-            &root_event,
-            Some(channel_id),
-            None,
-        )
-        .await
-        .expect("insert root")
-        .0;
-
-        create_thread_link(
-            &pool,
-            community_id,
-            "SnpsGroup/QuantaPki",
-            GithubSubjectType::Issue,
-            104,
-            channel_id,
-            root_event.id.as_bytes(),
-        )
-        .await
-        .expect("create link");
-
-        (pool, community_id, channel_id, root_stored)
-    }
-
-    async fn cleanup_github_fixture(pool: &sqlx::PgPool, community_uuid: Uuid) {
-        // FKs cascade from communities; github tables reference it directly.
-        sqlx::query("DELETE FROM github_outbox WHERE community_id = $1")
-            .bind(community_uuid)
-            .execute(pool)
+            let keys = nostr::Keys::generate();
+            let root_event = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+                "root",
+            )
+            .tags([nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag")])
+            .sign_with_keys(&keys)
+            .expect("sign root");
+            let root_stored = crate::event::insert_event_with_thread_metadata(
+                &pool,
+                community_id,
+                &root_event,
+                Some(channel_id),
+                None,
+            )
             .await
-            .expect("clean outbox");
-        sqlx::query("DELETE FROM github_thread_links WHERE community_id = $1")
-            .bind(community_uuid)
-            .execute(pool)
+            .expect("insert root")
+            .0;
+
+            create_thread_link(
+                &pool,
+                community_id,
+                "SnpsGroup/QuantaPki",
+                GithubSubjectType::Issue,
+                104,
+                channel_id,
+                root_event.id.as_bytes(),
+            )
             .await
-            .expect("clean links");
-        sqlx::query("DELETE FROM communities WHERE id = $1")
-            .bind(community_uuid)
-            .execute(pool)
-            .await
-            .expect("clean community");
-    }
+            .expect("create link");
 
-    /// The combined insert must store event + mentions + outbox atomically, and
-    /// a redelivered duplicate must not enqueue a second outbox row.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn insert_event_with_github_outbox_commits_all_three_or_nothing() {
-        let (pool, community_id, channel_id, root) = github_test_fixture().await;
-        let community_uuid = *community_id.as_uuid();
+            (pool, community_id, channel_id, root_stored)
+        }
 
-        let keys = nostr::Keys::generate();
-        let root_hex = root.event.id.to_hex();
-        let reply = nostr::EventBuilder::new(
-            nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
-            "reply via bridge",
-        )
-        .tags([
-            nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
-            nostr::Tag::parse(["e", &root_hex, "", "reply"]).expect("reply e tag"),
-            nostr::Tag::parse(["p", &keys.public_key().to_hex()]).expect("p tag"),
-        ])
-        .sign_with_keys(&keys)
-        .expect("sign reply");
-
-        let author = keys.public_key().to_bytes().to_vec();
-        let payload = serde_json::json!({});
-        let params = GithubOutboxInsert {
-            community_id,
-            action: GithubOutboxAction::Comment,
-            link_repo: "SnpsGroup/QuantaPki",
-            link_number: Some(104),
-            event_id: reply.id.as_bytes(),
-            author_pubkey: &author,
-            payload: &payload,
-        };
-        let thread_meta = crate::event::ThreadMetadataParams {
-            event_id: reply.id.as_bytes(),
-            event_created_at: chrono::Utc::now(),
-            channel_id,
-            parent_event_id: Some(root.event.id.as_bytes()),
-            parent_event_created_at: None,
-            root_event_id: Some(root.event.id.as_bytes()),
-            root_event_created_at: None,
-            depth: 1,
-            broadcast: false,
-        };
-
-        let (_, inserted) = insert_event_with_github_outbox(
-            &pool,
-            community_id,
-            &reply,
-            Some(channel_id),
-            Some(thread_meta),
-            params,
-        )
-        .await
-        .expect("combined insert");
-        assert!(inserted, "fresh event must insert");
-
-        let outbox_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM github_outbox WHERE community_id = $1")
+        async fn cleanup_github_fixture(pool: &sqlx::PgPool, community_uuid: Uuid) {
+            // FKs cascade from communities; github tables reference it directly.
+            sqlx::query("DELETE FROM github_outbox WHERE community_id = $1")
                 .bind(community_uuid)
-                .fetch_one(&pool)
+                .execute(pool)
                 .await
-                .expect("count outbox");
-        assert_eq!(outbox_rows, 1, "one outbox row per accepted publish");
-
-        let mention_rows: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
-        )
-        .bind(community_uuid)
-        .bind(reply.id.as_bytes())
-        .fetch_one(&pool)
-        .await
-        .expect("count mentions");
-        assert_eq!(mention_rows, 1, "p-tag mention row commits with the event");
-
-        // Redelivery of the same event: no second outbox row.
-        let payload2 = serde_json::json!({});
-        let params2 = GithubOutboxInsert {
-            community_id,
-            action: GithubOutboxAction::Comment,
-            link_repo: "SnpsGroup/QuantaPki",
-            link_number: Some(104),
-            event_id: reply.id.as_bytes(),
-            author_pubkey: &author,
-            payload: &payload2,
-        };
-        let (_, inserted_again) = insert_event_with_github_outbox(
-            &pool,
-            community_id,
-            &reply,
-            Some(channel_id),
-            None,
-            params2,
-        )
-        .await
-        .expect("duplicate combined insert must not error");
-        assert!(!inserted_again, "duplicate event must report not-inserted");
-        let outbox_rows: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM github_outbox WHERE community_id = $1")
+                .expect("clean outbox");
+            sqlx::query("DELETE FROM github_thread_links WHERE community_id = $1")
                 .bind(community_uuid)
-                .fetch_one(&pool)
+                .execute(pool)
                 .await
-                .expect("recount outbox");
-        assert_eq!(outbox_rows, 1, "duplicate must not enqueue a second row");
+                .expect("clean links");
+            sqlx::query("DELETE FROM communities WHERE id = $1")
+                .bind(community_uuid)
+                .execute(pool)
+                .await
+                .expect("clean community");
+        }
 
-        cleanup_github_fixture(&pool, community_uuid).await;
-    }
+        /// The combined insert must store event + mentions + outbox atomically, and
+        /// a redelivered duplicate must not enqueue a second outbox row.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn insert_event_with_github_outbox_commits_all_three_or_nothing() {
+            let (pool, community_id, channel_id, root) = github_test_fixture().await;
+            let community_uuid = *community_id.as_uuid();
 
-    /// The ingest hook's reverse lookup: root_event_id → link, community-scoped.
-    #[tokio::test]
-    #[ignore = "requires Postgres"]
-    async fn get_thread_link_by_root_resolves_and_scopes() {
-        let (pool, community_id, _channel_id, root) = github_test_fixture().await;
+            let keys = nostr::Keys::generate();
+            let root_hex = root.event.id.to_hex();
+            let reply = nostr::EventBuilder::new(
+                nostr::Kind::Custom(buzz_core::kind::KIND_STREAM_MESSAGE as u16),
+                "reply via bridge",
+            )
+            .tags([
+                nostr::Tag::parse(["h", &channel_id.to_string()]).expect("h tag"),
+                nostr::Tag::parse(["e", &root_hex, "", "reply"]).expect("reply e tag"),
+                nostr::Tag::parse(["p", &keys.public_key().to_hex()]).expect("p tag"),
+            ])
+            .sign_with_keys(&keys)
+            .expect("sign reply");
 
-        let link = get_thread_link_by_root(&pool, community_id, root.event.id.as_bytes()).await;
-        let link = link.expect("lookup").expect("link exists for the root");
-        assert_eq!(link.repo_full_name, "SnpsGroup/QuantaPki");
-        assert_eq!(link.subject_number, 104);
+            let author = keys.public_key().to_bytes().to_vec();
+            let payload = serde_json::json!({});
+            let params = GithubOutboxInsert {
+                community_id,
+                action: GithubOutboxAction::Comment,
+                link_repo: "SnpsGroup/QuantaPki",
+                link_number: Some(104),
+                event_id: reply.id.as_bytes(),
+                author_pubkey: &author,
+                payload: &payload,
+            };
+            let thread_meta = crate::event::ThreadMetadataParams {
+                event_id: reply.id.as_bytes(),
+                event_created_at: chrono::Utc::now(),
+                channel_id,
+                parent_event_id: Some(root.event.id.as_bytes()),
+                parent_event_created_at: None,
+                root_event_id: Some(root.event.id.as_bytes()),
+                root_event_created_at: None,
+                depth: 1,
+                broadcast: false,
+            };
 
-        let other_community = CommunityId::from_uuid(Uuid::new_v4());
-        let miss = get_thread_link_by_root(&pool, other_community, root.event.id.as_bytes())
+            let (_, inserted) = insert_event_with_github_outbox(
+                &pool,
+                community_id,
+                &reply,
+                Some(channel_id),
+                Some(thread_meta),
+                params,
+            )
             .await
-            .expect("scoped lookup");
-        assert!(miss.is_none(), "another community must not see the link");
+            .expect("combined insert");
+            assert!(inserted, "fresh event must insert");
 
-        cleanup_github_fixture(&pool, *community_id.as_uuid()).await;
+            let outbox_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM github_outbox WHERE community_id = $1")
+                    .bind(community_uuid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("count outbox");
+            assert_eq!(outbox_rows, 1, "one outbox row per accepted publish");
+
+            let mention_rows: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
+            )
+            .bind(community_uuid)
+            .bind(reply.id.as_bytes())
+            .fetch_one(&pool)
+            .await
+            .expect("count mentions");
+            assert_eq!(mention_rows, 1, "p-tag mention row commits with the event");
+
+            // Redelivery of the same event: no second outbox row.
+            let payload2 = serde_json::json!({});
+            let params2 = GithubOutboxInsert {
+                community_id,
+                action: GithubOutboxAction::Comment,
+                link_repo: "SnpsGroup/QuantaPki",
+                link_number: Some(104),
+                event_id: reply.id.as_bytes(),
+                author_pubkey: &author,
+                payload: &payload2,
+            };
+            let (_, inserted_again) = insert_event_with_github_outbox(
+                &pool,
+                community_id,
+                &reply,
+                Some(channel_id),
+                None,
+                params2,
+            )
+            .await
+            .expect("duplicate combined insert must not error");
+            assert!(!inserted_again, "duplicate event must report not-inserted");
+            let outbox_rows: i64 =
+                sqlx::query_scalar("SELECT count(*) FROM github_outbox WHERE community_id = $1")
+                    .bind(community_uuid)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("recount outbox");
+            assert_eq!(outbox_rows, 1, "duplicate must not enqueue a second row");
+
+            cleanup_github_fixture(&pool, community_uuid).await;
+        }
+
+        /// The ingest hook's reverse lookup: root_event_id → link, community-scoped.
+        #[tokio::test]
+        #[ignore = "requires Postgres"]
+        async fn get_thread_link_by_root_resolves_and_scopes() {
+            let (pool, community_id, _channel_id, root) = github_test_fixture().await;
+
+            let link = get_thread_link_by_root(&pool, community_id, root.event.id.as_bytes()).await;
+            let link = link.expect("lookup").expect("link exists for the root");
+            assert_eq!(link.repo_full_name, "SnpsGroup/QuantaPki");
+            assert_eq!(link.subject_number, 104);
+
+            let other_community = CommunityId::from_uuid(Uuid::new_v4());
+            let miss = get_thread_link_by_root(&pool, other_community, root.event.id.as_bytes())
+                .await
+                .expect("scoped lookup");
+            assert!(miss.is_none(), "another community must not see the link");
+
+            cleanup_github_fixture(&pool, *community_id.as_uuid()).await;
+        }
     }
 }

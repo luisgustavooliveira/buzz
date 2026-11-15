@@ -535,11 +535,11 @@ mod tests {
 
     #[tokio::test]
     async fn publish_requires_exactly_one_of_content_or_event() {
-        let client =
-            BuzzClient::new(
-                "http://127.0.0.1:1".into(),
-                crate::credentials::Credentials::from_keys(Keys::generate()),
-            ).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         let both = cmd_github_publish(&client, CHANNEL, ID_A, Some("x"), Some(ID_A))
             .await
@@ -564,11 +564,11 @@ mod tests {
 
     #[tokio::test]
     async fn open_issue_validation_fails_before_network() {
-        let client =
-            BuzzClient::new(
-                "http://127.0.0.1:1".into(),
-                crate::credentials::Credentials::from_keys(Keys::generate()),
-            ).unwrap();
+        let client = BuzzClient::new(
+            "http://127.0.0.1:1".into(),
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
         let base = OpenIssueParams {
             repo: "org/repo".into(),
             title: "Bug".into(),
@@ -730,7 +730,11 @@ mod tests {
     #[tokio::test]
     async fn publish_with_content_submits_tagged_reply() {
         let (url, captured) = fake_github_relay(parent_event_response()).await;
-        let client = BuzzClient::new(url, crate::credentials::Credentials::from_keys(Keys::generate())).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         cmd_github_publish(&client, CHANNEL, ID_A, Some("Ship it"), None)
             .await
@@ -752,7 +756,11 @@ mod tests {
     #[tokio::test]
     async fn publish_with_source_event_submits_note_and_reference() {
         let (url, captured) = fake_github_relay(parent_event_response()).await;
-        let client = BuzzClient::new(url, crate::credentials::Credentials::from_keys(Keys::generate())).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         cmd_github_publish(&client, CHANNEL, ID_A, None, Some(ID_A))
             .await
@@ -774,7 +782,11 @@ mod tests {
     async fn open_issue_submits_tagged_top_level_message() {
         // No --reply-to: no parent fetch, so /query is never needed.
         let (url, captured) = fake_github_relay("[]".into()).await;
-        let client = BuzzClient::new(url, crate::credentials::Credentials::from_keys(Keys::generate())).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         cmd_github_open_issue(
             &client,
@@ -822,7 +834,11 @@ mod tests {
     #[tokio::test]
     async fn open_issue_reply_includes_thread_tags() {
         let (url, captured) = fake_github_relay(parent_event_response()).await;
-        let client = BuzzClient::new(url, crate::credentials::Credentials::from_keys(Keys::generate())).unwrap();
+        let client = BuzzClient::new(
+            url,
+            crate::credentials::Credentials::from_keys(Keys::generate()),
+        )
+        .unwrap();
 
         cmd_github_open_issue(
             &client,
