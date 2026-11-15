@@ -1085,17 +1085,15 @@ mod tests {
         }
 
         async fn cleanup_github_fixture(pool: &sqlx::PgPool, community_uuid: Uuid) {
-            // FKs cascade from communities; github tables reference it directly.
-            sqlx::query("DELETE FROM github_outbox WHERE community_id = $1")
-                .bind(community_uuid)
-                .execute(pool)
-                .await
-                .expect("clean outbox");
-            sqlx::query("DELETE FROM github_thread_links WHERE community_id = $1")
-                .bind(community_uuid)
-                .execute(pool)
-                .await
-                .expect("clean links");
+            // Nothing cascades from communities: purge every scoped table in
+            // deletion's FK-safe order, then the community itself.
+            for table in crate::store::deletion::PURGE_SCOPED_TABLES {
+                sqlx::query(&format!("DELETE FROM {table} WHERE community_id = $1"))
+                    .bind(community_uuid)
+                    .execute(pool)
+                    .await
+                    .expect("clean scoped table");
+            }
             sqlx::query("DELETE FROM communities WHERE id = $1")
                 .bind(community_uuid)
                 .execute(pool)
@@ -1173,7 +1171,7 @@ mod tests {
                 "SELECT count(*) FROM event_mentions WHERE community_id = $1 AND event_id = $2",
             )
             .bind(community_uuid)
-            .bind(reply.id.as_bytes())
+            .bind(reply.id.as_bytes().as_slice())
             .fetch_one(&pool)
             .await
             .expect("count mentions");

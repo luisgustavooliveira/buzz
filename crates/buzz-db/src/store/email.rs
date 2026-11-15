@@ -829,7 +829,7 @@ mod postgres_tests {
             .expect("insert community");
         let community_id = CommunityId::from_uuid(community_uuid);
         let channel_id = Uuid::new_v4();
-        let author = vec![0x42; 32];
+        let author: Vec<u8> = vec![0x42; 32];
         sqlx::query(
             r#"INSERT INTO channels (id, community_id, name, channel_type, visibility, created_by)
                VALUES ($1, $2, 'email-test', 'stream', 'open', $3)"#,
@@ -918,26 +918,14 @@ mod postgres_tests {
                 .expect("count outbox");
         assert_eq!(count, 1);
 
-        for table in [
-            "email_outbox",
-            "email_messages",
-            "email_participants",
-            "email_conversations",
-            "email_quarantine",
-        ] {
-            let sql = match table {
-                "email_outbox" => "DELETE FROM email_outbox WHERE community_id = $1",
-                "email_messages" => "DELETE FROM email_messages WHERE community_id = $1",
-                "email_participants" => "DELETE FROM email_participants WHERE community_id = $1",
-                "email_conversations" => "DELETE FROM email_conversations WHERE community_id = $1",
-                "email_quarantine" => "DELETE FROM email_quarantine WHERE community_id = $1",
-                _ => unreachable!("fixed cleanup table list"),
-            };
-            sqlx::query(sql)
+        // Nothing cascades from communities: purge every scoped table in
+        // deletion's FK-safe order, then the community itself.
+        for table in crate::store::deletion::PURGE_SCOPED_TABLES {
+            sqlx::query(&format!("DELETE FROM {table} WHERE community_id = $1"))
                 .bind(community_uuid)
                 .execute(&pool)
                 .await
-                .expect("clean email table");
+                .expect("clean scoped table");
         }
         sqlx::query("DELETE FROM communities WHERE id = $1")
             .bind(community_uuid)
