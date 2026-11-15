@@ -91,6 +91,14 @@ pub const RELAY_ADMIN_TABLES: &[(&str, &str)] = &[
 /// blocks deletion until this manifest is intentionally updated.
 pub const EXPECTED_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
+    // SNPS fork bridge tables (migrations 9001/9002).
+    "email_conversations",
+    "email_messages",
+    "email_outbox",
+    "email_participants",
+    "email_quarantine",
+    "github_outbox",
+    "github_thread_links",
     "api_tokens",
     "archived_identities",
     "artifact_heads",
@@ -145,6 +153,15 @@ const EXCLUDED_SCOPED_TABLES: &[&str] = &[
 /// Foreign-key-safe child-before-parent order for the PostgreSQL purge.
 pub const PURGE_SCOPED_TABLES: &[&str] = &[
     "nip_fi_profile_heads",
+    // SNPS fork bridges: email children before their conversation, and both
+    // bridges before `channels`, which their links reference.
+    "email_participants",
+    "email_messages",
+    "email_outbox",
+    "email_conversations",
+    "email_quarantine",
+    "github_outbox",
+    "github_thread_links",
     "personal_read_frontiers",
     "personal_read_accounts",
     "workflow_approvals",

@@ -2678,6 +2678,15 @@ mod postgres_tests {
             .as_str()
             .contains("attach_community_write_fence('community_nip_fi_issuers')"));
         expected_fences.insert("community_nip_fi_issuers".to_owned());
+        // SNPS fork migrations (>= 9000) predate the upstream no-new-fence
+        // rule and are already applied in production with their fences; the
+        // desired-state schema mirrors them under `schema/triggers/`.
+        for migration in MIGRATOR
+            .iter()
+            .filter(|migration| migration.version >= FORK_MIGRATION_BASE)
+        {
+            expected_fences.extend(surface(migration.sql.as_ref()).fence_attachments);
+        }
         assert_eq!(
             expected_fences, schema.fence_attachments,
             "write-fence attachment targets differ after recovery policy"
