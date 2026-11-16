@@ -745,7 +745,7 @@ mod tests {
 
     #[test]
     fn recipient_rule_uses_first_to_agent_as_owner() {
-        let accounts = vec![
+        let accounts = [
             EmailAccountConfig {
                 agent_pubkey: "11".repeat(32),
                 address: "one@example.org".into(),
