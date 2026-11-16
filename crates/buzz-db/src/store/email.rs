@@ -50,6 +50,12 @@ pub struct EmailConversation {
     pub status: EmailConversationStatus,
     /// V2 switch; always false in V1.
     pub external_enabled: bool,
+    /// External helpdesk ticket ID, once its durable creation succeeds.
+    pub helpdesk_ticket_id: Option<i64>,
+    /// Human-readable helpdesk ticket number.
+    pub helpdesk_ticket_number: Option<String>,
+    /// Relay agent responsible for a helpdesk conversation.
+    pub helpdesk_owner_agent_pubkey: Option<Vec<u8>>,
 }
 
 /// Participant inserted with a new conversation or a later outbound message.
@@ -82,6 +88,8 @@ pub struct EmailConversationInsert<'a> {
     pub is_new: bool,
     /// Participants known after this outbound action.
     pub participants: &'a [EmailParticipantInsert],
+    /// Relay agent responsible for a new helpdesk conversation.
+    pub helpdesk_owner_agent_pubkey: Option<&'a [u8]>,
 }
 
 /// Outbox data committed with an outbound event.
@@ -164,6 +172,9 @@ fn row_to_conversation(row: &sqlx::postgres::PgRow) -> Result<EmailConversation>
         root_event_id: row.try_get("root_event_id")?,
         status: EmailConversationStatus::from_db(row.try_get("status")?)?,
         external_enabled: row.try_get("external_enabled")?,
+        helpdesk_ticket_id: row.try_get("helpdesk_ticket_id")?,
+        helpdesk_ticket_number: row.try_get("helpdesk_ticket_number")?,
+        helpdesk_owner_agent_pubkey: row.try_get("helpdesk_owner_agent_pubkey")?,
     })
 }
 
@@ -187,7 +198,8 @@ pub async fn get_conversation_by_root(
     root_event_id: &[u8],
 ) -> Result<Option<EmailConversation>> {
     let row = sqlx::query(
-        r#"SELECT community_id, id, channel_id, root_event_id, status, external_enabled
+        r#"SELECT community_id, id, channel_id, root_event_id, status, external_enabled,
+                  helpdesk_ticket_id, helpdesk_ticket_number, helpdesk_owner_agent_pubkey
            FROM email_conversations
            WHERE community_id = $1 AND root_event_id = $2"#,
     )
@@ -205,11 +217,31 @@ pub async fn get_conversation(
     id: Uuid,
 ) -> Result<Option<EmailConversation>> {
     let row = sqlx::query(
-        r#"SELECT community_id, id, channel_id, root_event_id, status, external_enabled
+        r#"SELECT community_id, id, channel_id, root_event_id, status, external_enabled,
+                  helpdesk_ticket_id, helpdesk_ticket_number, helpdesk_owner_agent_pubkey
            FROM email_conversations WHERE community_id = $1 AND id = $2"#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| row_to_conversation(&row)).transpose()
+}
+
+/// Fetch a conversation by its external helpdesk ticket ID.
+pub async fn get_conversation_by_helpdesk_ticket(
+    pool: &PgPool,
+    community_id: CommunityId,
+    ticket_id: i64,
+) -> Result<Option<EmailConversation>> {
+    let row = sqlx::query(
+        r#"SELECT community_id, id, channel_id, root_event_id, status, external_enabled,
+                  helpdesk_ticket_id, helpdesk_ticket_number, helpdesk_owner_agent_pubkey
+           FROM email_conversations
+           WHERE community_id = $1 AND helpdesk_ticket_id = $2"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(ticket_id)
     .fetch_optional(pool)
     .await?;
     row.map(|row| row_to_conversation(&row)).transpose()
@@ -227,7 +259,8 @@ pub async fn find_conversations_for_message_ids(
     }
     let rows = sqlx::query(
         r#"SELECT DISTINCT c.community_id, c.id, c.channel_id, c.root_event_id,
-                  c.status, c.external_enabled
+                  c.status, c.external_enabled, c.helpdesk_ticket_id,
+                  c.helpdesk_ticket_number, c.helpdesk_owner_agent_pubkey
            FROM email_conversations c
            JOIN email_messages m
              ON m.community_id = c.community_id AND m.conversation_id = c.id
@@ -291,6 +324,27 @@ pub async fn inbound_message_is_delivered(
         r#"SELECT 1 FROM email_messages
            WHERE community_id = $1 AND internet_message_id = $2 AND mailbox_id = $3
              AND direction = 'inbound' AND buzz_event_id IS NOT NULL"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(internet_message_id)
+    .bind(mailbox_id)
+    .fetch_optional(pool)
+    .await?
+    .is_some();
+    Ok(exists)
+}
+
+/// Whether either direction already recorded this Message-ID in the mailbox.
+pub async fn email_message_is_recorded(
+    pool: &PgPool,
+    community_id: CommunityId,
+    internet_message_id: &str,
+    mailbox_id: &str,
+) -> Result<bool> {
+    let exists = sqlx::query(
+        r#"SELECT 1 FROM email_messages
+           WHERE community_id = $1 AND internet_message_id = $2 AND mailbox_id = $3
+             AND buzz_event_id IS NOT NULL"#,
     )
     .bind(community_id.as_uuid())
     .bind(internet_message_id)
@@ -463,14 +517,16 @@ async fn insert_email_outbox_tx(
     if conversation.is_new {
         sqlx::query(
             r#"INSERT INTO email_conversations
-                 (community_id, id, channel_id, root_event_id, created_by)
-               VALUES ($1, $2, $3, $4, $5)"#,
+                 (community_id, id, channel_id, root_event_id, created_by,
+                  helpdesk_owner_agent_pubkey)
+               VALUES ($1, $2, $3, $4, $5, $6)"#,
         )
         .bind(community_id.as_uuid())
         .bind(conversation.id)
         .bind(conversation.channel_id)
         .bind(conversation.root_event_id)
         .bind(conversation.created_by)
+        .bind(conversation.helpdesk_owner_agent_pubkey)
         .execute(tx.conn())
         .await?;
     }
@@ -506,6 +562,57 @@ async fn insert_email_outbox_tx(
     .bind(outbox.payload)
     .execute(tx.conn())
     .await?;
+    Ok(())
+}
+
+/// Persist the external ticket after its durable creation request succeeds.
+pub async fn set_helpdesk_ticket(
+    pool: &PgPool,
+    community_id: CommunityId,
+    conversation_id: Uuid,
+    ticket_id: i64,
+    ticket_number: &str,
+) -> Result<()> {
+    sqlx::query(
+        r#"UPDATE email_conversations
+           SET helpdesk_ticket_id = $3, helpdesk_ticket_number = $4, updated_at = now()
+           WHERE community_id = $1 AND id = $2
+             AND (helpdesk_ticket_id IS NULL OR helpdesk_ticket_id = $3)"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(conversation_id)
+    .bind(ticket_id)
+    .bind(ticket_number)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Add newly observed helpdesk participants without replacing existing roles.
+pub async fn add_email_participants(
+    pool: &PgPool,
+    community_id: CommunityId,
+    conversation_id: Uuid,
+    participants: &[EmailParticipantInsert],
+) -> Result<()> {
+    for participant in participants {
+        sqlx::query(
+            r#"INSERT INTO email_participants
+                 (community_id, conversation_id, address, participant_type, role,
+                  agent_pubkey, approved_by)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               ON CONFLICT DO NOTHING"#,
+        )
+        .bind(community_id.as_uuid())
+        .bind(conversation_id)
+        .bind(&participant.address)
+        .bind(&participant.participant_type)
+        .bind(&participant.role)
+        .bind(&participant.agent_pubkey)
+        .bind(&participant.approved_by)
+        .execute(pool)
+        .await?;
+    }
     Ok(())
 }
 
@@ -580,15 +687,23 @@ pub async fn mark_outbox_failed(
 }
 
 /// Mark a row sent and register its Message-ID for inbound threading.
-pub async fn mark_outbox_sent(pool: &PgPool, community_id: CommunityId, id: Uuid) -> Result<()> {
+pub async fn mark_outbox_sent(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    delivered_message_id: Option<&str>,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
     let row = sqlx::query(
-        r#"UPDATE email_outbox SET status = 'sent', sent_at = now(), last_error = NULL
+        r#"UPDATE email_outbox
+           SET status = 'sent', sent_at = now(), last_error = NULL,
+               internet_message_id = COALESCE($3, internet_message_id)
            WHERE community_id = $1 AND id = $2 AND status = 'pending'
            RETURNING conversation_id, event_id, internet_message_id, payload"#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
+    .bind(delivered_message_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -598,6 +713,10 @@ pub async fn mark_outbox_sent(pool: &PgPool, community_id: CommunityId, id: Uuid
     let event_id: Vec<u8> = row.try_get("event_id")?;
     let internet_message_id: String = row.try_get("internet_message_id")?;
     let payload: serde_json::Value = row.try_get("payload")?;
+    if payload.get("operation").and_then(serde_json::Value::as_str) == Some("zammad_add_note") {
+        tx.commit().await?;
+        return Ok(());
+    }
     let mailbox_id = payload
         .get("mailbox_id")
         .and_then(serde_json::Value::as_str)
@@ -613,11 +732,18 @@ pub async fn mark_outbox_sent(pool: &PgPool, community_id: CommunityId, id: Uuid
     let parent = payload
         .get("in_reply_to")
         .and_then(serde_json::Value::as_str);
+    let direction = if payload.get("operation").and_then(serde_json::Value::as_str)
+        == Some("zammad_create_ticket")
+    {
+        "inbound"
+    } else {
+        "outbound"
+    };
     sqlx::query(
         r#"INSERT INTO email_messages
              (community_id, internet_message_id, mailbox_id, conversation_id,
               parent_message_id, direction, sender_address, buzz_event_id)
-           VALUES ($1, $2, $3, $4, $5, 'outbound', $6, $7)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
            ON CONFLICT DO NOTHING"#,
     )
     .bind(community_id.as_uuid())
@@ -625,6 +751,7 @@ pub async fn mark_outbox_sent(pool: &PgPool, community_id: CommunityId, id: Uuid
     .bind(mailbox_id)
     .bind(conversation_id)
     .bind(parent)
+    .bind(direction)
     .bind(sender)
     .bind(event_id)
     .execute(&mut *tx)
@@ -675,6 +802,43 @@ impl Db {
         get_conversation(&self.pool, community_id, id).await
     }
 
+    /// Fetch a conversation by its external helpdesk ticket ID.
+    pub async fn email_get_conversation_by_helpdesk_ticket(
+        &self,
+        community_id: CommunityId,
+        ticket_id: i64,
+    ) -> Result<Option<EmailConversation>> {
+        get_conversation_by_helpdesk_ticket(&self.pool, community_id, ticket_id).await
+    }
+
+    /// Save a successfully created helpdesk ticket for retry-safe routing.
+    pub async fn email_set_helpdesk_ticket(
+        &self,
+        community_id: CommunityId,
+        conversation_id: Uuid,
+        ticket_id: i64,
+        ticket_number: &str,
+    ) -> Result<()> {
+        set_helpdesk_ticket(
+            &self.pool,
+            community_id,
+            conversation_id,
+            ticket_id,
+            ticket_number,
+        )
+        .await
+    }
+
+    /// Add participants observed on later helpdesk messages.
+    pub async fn email_add_participants(
+        &self,
+        community_id: CommunityId,
+        conversation_id: Uuid,
+        participants: &[EmailParticipantInsert],
+    ) -> Result<()> {
+        add_email_participants(&self.pool, community_id, conversation_id, participants).await
+    }
+
     /// Claim due email outbox rows.
     #[datastore_span(name = "email_claim_due_outbox", system = "postgresql")]
     pub async fn email_claim_due_outbox(
@@ -707,9 +871,14 @@ impl Db {
         mark_outbox_failed(&self.pool, community_id, id, error).await
     }
 
-    /// Mark an email outbox row sent.
-    pub async fn email_mark_outbox_sent(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
-        mark_outbox_sent(&self.pool, community_id, id).await
+    /// Mark an email outbox row sent, preserving the provider Message-ID.
+    pub async fn email_mark_outbox_sent(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        delivered_message_id: Option<&str>,
+    ) -> Result<()> {
+        mark_outbox_sent(&self.pool, community_id, id, delivered_message_id).await
     }
 
     /// Resolve conversations by email threading IDs.
@@ -749,6 +918,16 @@ impl Db {
     ) -> Result<bool> {
         inbound_message_is_delivered(&self.pool, community_id, internet_message_id, mailbox_id)
             .await
+    }
+
+    /// Check either direction to suppress reflected helpdesk messages.
+    pub async fn email_message_is_recorded(
+        &self,
+        community_id: CommunityId,
+        internet_message_id: &str,
+        mailbox_id: &str,
+    ) -> Result<bool> {
+        email_message_is_recorded(&self.pool, community_id, internet_message_id, mailbox_id).await
     }
 
     /// Check whether an address is a relay participant in a conversation.
@@ -867,6 +1046,7 @@ mod postgres_tests {
                 created_by: event.pubkey.as_bytes(),
                 is_new: true,
                 participants: &participants,
+                helpdesk_owner_agent_pubkey: None,
             },
             event_id: event.id.as_bytes(),
             author_pubkey: event.pubkey.as_bytes(),
@@ -899,6 +1079,7 @@ mod postgres_tests {
                     created_by: event.pubkey.as_bytes(),
                     is_new: true,
                     participants: &participants,
+                    helpdesk_owner_agent_pubkey: None,
                 },
                 event_id: event.id.as_bytes(),
                 author_pubkey: event.pubkey.as_bytes(),

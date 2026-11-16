@@ -177,6 +177,8 @@ pub struct EmailConfig {
     pub allowed_senders: Vec<EmailSenderConfig>,
     /// Optional Graph inbound configuration; outbound can run without it.
     pub graph: Option<EmailGraphConfig>,
+    /// Optional shared internal mailbox connected to a Zammad helpdesk.
+    pub helpdesk: Option<EmailHelpdeskConfig>,
 }
 
 /// Agent address, mailbox and Buzz authority mapping.
@@ -218,6 +220,29 @@ pub struct EmailGraphConfig {
     pub client_state_path: std::path::PathBuf,
     /// Graph base URL; overridable for local integration tests.
     pub api_base_url: String,
+}
+
+/// Shared-mailbox helpdesk ingress and Zammad API routing.
+#[derive(Debug, Clone)]
+pub struct EmailHelpdeskConfig {
+    /// Canonical shared inbox address.
+    pub inbox_address: String,
+    /// Exchange mailbox object ID.
+    pub mailbox_id: String,
+    /// Expected Graph subscription for the shared inbox.
+    pub graph_subscription_id: uuid::Uuid,
+    /// Buzz channel receiving one thread per ticket.
+    pub channel_id: uuid::Uuid,
+    /// Zammad group used for new tickets.
+    pub group: String,
+    /// Agent context used to create unassigned tickets.
+    pub fallback_agent_address: String,
+    /// Zammad REST API base URL.
+    pub api_base_url: String,
+    /// File containing the Zammad API token.
+    pub api_token_path: std::path::PathBuf,
+    /// File containing the dedicated Zammad webhook bearer token.
+    pub webhook_token_path: std::path::PathBuf,
 }
 
 impl EmailConfig {
@@ -1074,9 +1099,20 @@ fn parse_email_config(
         pubkey: String,
     }
     #[derive(serde::Deserialize)]
+    struct RawHelpdesk {
+        inbox_address: String,
+        mailbox_id: String,
+        graph_subscription_id: String,
+        channel_id: String,
+        group: String,
+        fallback_agent_address: String,
+        api_base_url: String,
+    }
+    #[derive(serde::Deserialize)]
     struct RawRoutes {
         accounts: Vec<RawAccount>,
         allowed_senders: Vec<RawSender>,
+        helpdesk: Option<RawHelpdesk>,
     }
     let routes: RawRoutes = serde_json::from_str(&required("BUZZ_EMAIL_ROUTES")?).map_err(|e| {
         ConfigError::InvalidValue(format!("BUZZ_EMAIL_ROUTES is not valid JSON: {e}"))
@@ -1185,6 +1221,70 @@ fn parse_email_config(
         None
     };
 
+    let helpdesk = match routes.helpdesk {
+        Some(raw) => {
+            if !graph_enabled {
+                return Err(ConfigError::InvalidValue(
+                    "email helpdesk requires BUZZ_EMAIL_GRAPH_ENABLED".into(),
+                ));
+            }
+            let inbox_address = canonical_email_address(&raw.inbox_address).ok_or_else(|| {
+                ConfigError::InvalidValue("invalid helpdesk inbox_address".into())
+            })?;
+            let mailbox_id = raw.mailbox_id.trim().to_string();
+            if mailbox_id.is_empty()
+                || seen_addresses.contains(&inbox_address)
+                || seen_mailboxes.contains(&mailbox_id.to_lowercase())
+            {
+                return Err(ConfigError::InvalidValue(
+                    "helpdesk inbox must be distinct from agent accounts".into(),
+                ));
+            }
+            let graph_subscription_id =
+                raw.graph_subscription_id
+                    .parse::<uuid::Uuid>()
+                    .map_err(|_| {
+                        ConfigError::InvalidValue(
+                            "helpdesk graph_subscription_id must be a UUID".into(),
+                        )
+                    })?;
+            let channel_id = raw.channel_id.parse::<uuid::Uuid>().map_err(|_| {
+                ConfigError::InvalidValue("helpdesk channel_id must be a UUID".into())
+            })?;
+            let group = raw.group.trim().to_string();
+            if group.is_empty() || group.contains(['\r', '\n']) {
+                return Err(ConfigError::InvalidValue(
+                    "helpdesk group must be a single line".into(),
+                ));
+            }
+            let fallback_agent_address = canonical_email_address(&raw.fallback_agent_address)
+                .ok_or_else(|| {
+                    ConfigError::InvalidValue("invalid helpdesk fallback_agent_address".into())
+                })?;
+            let api_base_url = raw.api_base_url.trim().trim_end_matches('/').to_string();
+            let parsed = url::Url::parse(&api_base_url).map_err(|_| {
+                ConfigError::InvalidValue("helpdesk api_base_url is invalid".into())
+            })?;
+            if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+                return Err(ConfigError::InvalidValue(
+                    "helpdesk api_base_url must be an HTTP(S) URL".into(),
+                ));
+            }
+            Some(EmailHelpdeskConfig {
+                inbox_address,
+                mailbox_id,
+                graph_subscription_id,
+                channel_id,
+                group,
+                fallback_agent_address,
+                api_base_url,
+                api_token_path: required("BUZZ_EMAIL_HELPDESK_API_TOKEN_PATH")?.into(),
+                webhook_token_path: required("BUZZ_EMAIL_HELPDESK_WEBHOOK_TOKEN_PATH")?.into(),
+            })
+        }
+        None => None,
+    };
+
     Ok(Some(EmailConfig {
         smtp_host,
         smtp_port,
@@ -1194,6 +1294,7 @@ fn parse_email_config(
         accounts,
         allowed_senders,
         graph,
+        helpdesk,
     }))
 }
 
@@ -1443,7 +1544,7 @@ impl Config {
             Err(std::env::VarError::NotUnicode(_)) => {
                 return Err(ConfigError::InvalidValue(
                     "BUZZ_MULTI_COMMUNITY_RELAY must be true or false".to_string(),
-                ))
+                ));
             }
         };
         if !multi_community_relay && crate::tenant::relay_url_authority(&relay_url).is_empty() {
@@ -1585,7 +1686,7 @@ impl Config {
             Err(_) => {
                 return Err(ConfigError::InvalidValue(
                     "BUZZ_MEDIA_READ_MODE must be valid Unicode".into(),
-                ))
+                ));
             }
         };
         let media = buzz_media::MediaConfig {
@@ -1940,7 +2041,7 @@ impl Config {
                     Some(other) => {
                         return Err(ConfigError::InvalidValue(format!(
                             "BUZZ_ADMIN_AUTH must be \"nip98\" or \"disabled\"; got \"{other}\""
-                        )))
+                        )));
                     }
                 };
 

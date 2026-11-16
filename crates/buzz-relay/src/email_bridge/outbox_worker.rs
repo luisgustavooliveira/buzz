@@ -90,6 +90,22 @@ async fn renew_subscriptions(state: &Arc<AppState>) {
             }
         }
     }
+    if let Some(helpdesk) = config.helpdesk.as_ref() {
+        match graph
+            .renew_subscription(helpdesk.graph_subscription_id)
+            .await
+        {
+            Ok(()) => {
+                metrics::counter!("buzz_email_graph_subscription_renewal_total", "status" => "ok")
+                    .increment(1)
+            }
+            Err(error) => {
+                metrics::counter!("buzz_email_graph_subscription_renewal_total", "status" => "error").increment(1);
+                error!(mailbox_id = %helpdesk.mailbox_id, error = %truncate_chars(&error, 256),
+                    "helpdesk Graph subscription renewal failed; recreate it before expiry");
+            }
+        }
+    }
 }
 
 async fn deliver(state: &Arc<AppState>, row: buzz_db::email::EmailOutboxRow) {
@@ -98,14 +114,82 @@ async fn deliver(state: &Arc<AppState>, row: buzz_db::email::EmailOutboxRow) {
             .email
             .get()
             .ok_or_else(|| "email bridge state missing".to_string())?;
-        bridge.smtp.send(&row.payload).await
+        match row.payload.get("operation").and_then(serde_json::Value::as_str) {
+            Some("zammad_create_ticket") => {
+                let zammad = bridge.helpdesk.as_ref().ok_or("helpdesk client missing")?;
+                let conversation = state
+                    .db
+                    .email_get_conversation(row.community_id, row.conversation_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or("helpdesk conversation missing")?;
+                let ticket = if let Some(id) = conversation.helpdesk_ticket_id {
+                    super::helpdesk::ZammadTicket {
+                        id,
+                        number: conversation.helpdesk_ticket_number.as_deref().unwrap_or("0").parse().unwrap_or(0),
+                    }
+                } else {
+                    let ticket = zammad.create_ticket(&row.payload).await?;
+                    state
+                        .db
+                        .email_set_helpdesk_ticket(
+                            row.community_id,
+                            row.conversation_id,
+                            ticket.id,
+                            &ticket.number.to_string(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    ticket
+                };
+                let tenant = TenantContext::resolved(row.community_id, state.config.relay_url.clone());
+                let note = format!(
+                    "Ticket #{} criado no Zammad. {}\nAs respostas por e-mail nesta thread serão registradas no ticket.",
+                    ticket.number,
+                    zammad.ticket_url(ticket.id)
+                );
+                post_email_note(&tenant, state, &conversation, &note)
+                    .await
+                    .map(|_| None)
+            }
+            Some("zammad_add_note") => {
+                let zammad = bridge.helpdesk.as_ref().ok_or("helpdesk client missing")?;
+                let conversation = state
+                    .db
+                    .email_get_conversation(row.community_id, row.conversation_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or("helpdesk conversation missing")?;
+                let ticket_id = conversation.helpdesk_ticket_id.ok_or("helpdesk ticket ID missing")?;
+                zammad
+                    .add_public_note(ticket_id, &row.payload)
+                    .await
+                    .map(|_| None)
+            }
+            Some("zammad_add_article") => {
+                let zammad = bridge.helpdesk.as_ref().ok_or("helpdesk client missing")?;
+                let conversation = state
+                    .db
+                    .email_get_conversation(row.community_id, row.conversation_id)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .ok_or("helpdesk conversation missing")?;
+                let ticket_id = conversation.helpdesk_ticket_id.ok_or("helpdesk ticket ID missing")?;
+                zammad
+                    .add_outgoing_article(ticket_id, &row.payload)
+                    .await
+                    .map(Some)
+            }
+            Some("smtp_send") | None => bridge.smtp.send(&row.payload).await.map(|_| None),
+            Some(operation) => Err(format!("unknown email outbox operation {operation}")),
+        }
     }
     .await;
     match result {
-        Ok(()) => {
+        Ok(delivered_message_id) => {
             if let Err(error) = state
                 .db
-                .email_mark_outbox_sent(row.community_id, row.id)
+                .email_mark_outbox_sent(row.community_id, row.id, delivered_message_id.as_deref())
                 .await
             {
                 // SMTP succeeded. Retrying the whole row could duplicate the

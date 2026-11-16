@@ -57,7 +57,7 @@ pub async fn graph_webhook(
     let payload: GraphNotificationPayload = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
         Err(_) => {
-            return super::api_error(StatusCode::BAD_REQUEST, "invalid JSON body").into_response()
+            return super::api_error(StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
         }
     };
     let Some(config) = state.config.email.as_ref() else {
@@ -82,6 +82,34 @@ pub async fn graph_webhook(
         let Some(mailbox_id) = mailbox_from_resource(&notification.resource) else {
             continue;
         };
+        if let Some(helpdesk) = config
+            .helpdesk
+            .as_ref()
+            .filter(|helpdesk| helpdesk.mailbox_id.eq_ignore_ascii_case(&mailbox_id))
+        {
+            if helpdesk.graph_subscription_id.to_string() != notification.subscription_id {
+                warn!(mailbox_id = %helpdesk.mailbox_id, "helpdesk Graph webhook: unexpected subscription");
+                continue;
+            }
+            if let Err(error) = crate::email_bridge::helpdesk::process_notification(
+                &tenant,
+                &state,
+                config,
+                helpdesk,
+                notification,
+            )
+            .await
+            {
+                warn!(error = %crate::email_bridge::truncate_chars(&error, 256),
+                    "helpdesk Graph notification processing failed");
+                return super::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "temporarily unavailable",
+                )
+                .into_response();
+            }
+            continue;
+        }
         let Some(account) = config.account_for_mailbox(&mailbox_id) else {
             continue;
         };
@@ -96,6 +124,66 @@ pub async fn graph_webhook(
             return super::api_error(StatusCode::INTERNAL_SERVER_ERROR, "temporarily unavailable")
                 .into_response();
         }
+    }
+    (
+        StatusCode::ACCEPTED,
+        axum::Json(serde_json::json!({"status": "accepted"})),
+    )
+        .into_response()
+}
+
+/// Receive notes created directly in the Zammad app and mirror them to Buzz.
+pub async fn zammad_webhook(
+    State(state): State<std::sync::Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(bridge) = state.email.get() else {
+        return super::not_found("not found").into_response();
+    };
+    let Some(expected_token) = bridge.helpdesk_webhook_token.as_deref() else {
+        return super::not_found("not found").into_response();
+    };
+    let bearer = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !bool::from(bearer.as_bytes().ct_eq(expected_token)) {
+        warn!("Zammad app webhook: invalid bearer token");
+        return super::api_error(StatusCode::UNAUTHORIZED, "authentication failed").into_response();
+    }
+    let raw_host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    let tenant = match crate::tenant::bind_community(&state.db, raw_host).await {
+        Ok(tenant) => tenant,
+        Err(_) => return super::not_found("not found").into_response(),
+    };
+    let Some(config) = state.config.email.as_ref() else {
+        return super::not_found("not found").into_response();
+    };
+    let Some(helpdesk) = config.helpdesk.as_ref() else {
+        return super::not_found("not found").into_response();
+    };
+    let payload: crate::email_bridge::helpdesk::ZammadWebhookPayload =
+        match serde_json::from_slice(&body) {
+            Ok(payload) => payload,
+            Err(_) => {
+                return super::api_error(StatusCode::BAD_REQUEST, "invalid JSON body")
+                    .into_response();
+            }
+        };
+    if let Err(error) = crate::email_bridge::helpdesk::process_app_webhook(
+        &tenant, &state, config, helpdesk, &payload,
+    )
+    .await
+    {
+        warn!(error = %crate::email_bridge::truncate_chars(&error, 256),
+            "Zammad app webhook processing failed");
+        return super::api_error(StatusCode::INTERNAL_SERVER_ERROR, "temporarily unavailable")
+            .into_response();
     }
     (
         StatusCode::ACCEPTED,

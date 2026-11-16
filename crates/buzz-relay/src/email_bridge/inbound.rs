@@ -146,7 +146,7 @@ impl GraphClient {
             .extend(["users", mailbox_id, "messages", message_id]);
         url.query_pairs_mut().append_pair(
             "$select",
-            "id,internetMessageId,subject,body,bodyPreview,from,internetMessageHeaders,receivedDateTime",
+            "id,internetMessageId,subject,body,bodyPreview,from,toRecipients,ccRecipients,internetMessageHeaders,receivedDateTime",
         );
         let response = self
             .http
@@ -212,6 +212,12 @@ pub struct GraphMessage {
     pub body_preview: Option<String>,
     /// Sender.
     pub from: Option<GraphRecipient>,
+    /// Primary recipients.
+    #[serde(default)]
+    pub to_recipients: Vec<GraphRecipient>,
+    /// Copied recipients.
+    #[serde(default)]
+    pub cc_recipients: Vec<GraphRecipient>,
     /// Internet headers including In-Reply-To and References.
     #[serde(default)]
     pub internet_message_headers: Vec<GraphHeader>,
@@ -268,6 +274,22 @@ impl GraphMessage {
         crate::config::canonical_email_address(&self.from.as_ref()?.email_address.address)
     }
 
+    /// Canonical To and Cc addresses, preserving their roles.
+    pub fn recipient_addresses(&self) -> (Vec<String>, Vec<String>) {
+        let canonical = |recipients: &[GraphRecipient]| {
+            recipients
+                .iter()
+                .filter_map(|recipient| {
+                    crate::config::canonical_email_address(&recipient.email_address.address)
+                })
+                .collect()
+        };
+        (
+            canonical(&self.to_recipients),
+            canonical(&self.cc_recipients),
+        )
+    }
+
     /// Plain text, capped before entering Buzz. HTML mail uses Exchange's
     /// plain-text bodyPreview instead of emitting active markup.
     pub fn plain_text(&self) -> String {
@@ -285,6 +307,27 @@ impl GraphMessage {
         serde_json::json!({ "authentication_results": self.headers("Authentication-Results") })
     }
 
+    /// Internal helpdesk mail requires Exchange authentication and tenant proof.
+    pub fn sender_authenticated_internal(
+        &self,
+        sender: &str,
+        internal_domain: &str,
+        tenant_id: &str,
+    ) -> bool {
+        let sender_is_internal = sender
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(internal_domain));
+        let exchange_internal = self
+            .headers("X-MS-Exchange-Organization-AuthAs")
+            .first()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("Internal"));
+        let same_tenant = self
+            .headers("X-MS-Exchange-CrossTenant-Id")
+            .first()
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case(tenant_id));
+        sender_is_internal && exchange_internal && same_tenant
+    }
+
     /// V1 accepts DMARC pass at the Exchange boundary or an internal M365
     /// response with Microsoft's Internal and matching tenant markers.
     pub fn sender_authenticated_v1(
@@ -300,18 +343,7 @@ impl GraphMessage {
         {
             return true;
         }
-        let sender_is_internal = sender
-            .rsplit_once('@')
-            .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(internal_domain));
-        let exchange_internal = self
-            .headers("X-MS-Exchange-Organization-AuthAs")
-            .first()
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case("Internal"));
-        let same_tenant = self
-            .headers("X-MS-Exchange-CrossTenant-Id")
-            .first()
-            .is_some_and(|value| value.trim().eq_ignore_ascii_case(tenant_id));
-        sender_is_internal && exchange_internal && same_tenant
+        self.sender_authenticated_internal(sender, internal_domain, tenant_id)
     }
 }
 
@@ -467,6 +499,22 @@ pub async fn process_notification(
     let message = graph
         .get_message(&account.mailbox_id, &notification.resource_data.id)
         .await?;
+    if let Some(helpdesk) = state
+        .config
+        .email
+        .as_ref()
+        .and_then(|config| config.helpdesk.as_ref())
+    {
+        let (to, cc) = message.recipient_addresses();
+        if to
+            .iter()
+            .chain(cc.iter())
+            .any(|address| address == &helpdesk.inbox_address)
+        {
+            metrics::counter!("buzz_email_inbound_total", "status" => "helpdesk_duplicate_suppressed").increment(1);
+            return Ok(());
+        }
+    }
     let sender = message.sender().unwrap_or_default();
     let internet_message_id = message.internet_message_id.clone().unwrap_or_default();
     let references = threading_ids(&message);
@@ -661,6 +709,8 @@ mod tests {
             body: None,
             body_preview: None,
             from: None,
+            to_recipients: vec![],
+            cc_recipients: vec![],
             internet_message_headers: vec![GraphHeader {
                 name: "Auto-Submitted".into(),
                 value: "no".into(),
@@ -678,6 +728,8 @@ mod tests {
             body: None,
             body_preview: None,
             from: None,
+            to_recipients: vec![],
+            cc_recipients: vec![],
             internet_message_headers: vec![
                 GraphHeader {
                     name: "Authentication-Results".into(),
@@ -706,6 +758,8 @@ mod tests {
             body: None,
             body_preview: None,
             from: None,
+            to_recipients: vec![],
+            cc_recipients: vec![],
             internet_message_headers: vec![
                 GraphHeader {
                     name: "Authentication-Results".into(),
@@ -751,6 +805,8 @@ mod tests {
             body: None,
             body_preview: None,
             from: None,
+            to_recipients: vec![],
+            cc_recipients: vec![],
             internet_message_headers: vec![
                 GraphHeader {
                     name: "In-Reply-To".into(),
@@ -872,6 +928,8 @@ mod tests {
             }),
             body_preview: Some("Resposta em texto".into()),
             from: None,
+            to_recipients: vec![],
+            cc_recipients: vec![],
             internet_message_headers: vec![],
         };
         assert_eq!(message.plain_text(), "Resposta em texto");

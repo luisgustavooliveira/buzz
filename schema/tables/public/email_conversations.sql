@@ -7,6 +7,9 @@ CREATE TABLE email_conversations (
     status                TEXT NOT NULL DEFAULT 'active'
                           CHECK (status IN ('active', 'closed')),
     external_enabled      BOOLEAN NOT NULL DEFAULT FALSE,
+    helpdesk_ticket_id    BIGINT,
+    helpdesk_ticket_number TEXT,
+    helpdesk_owner_agent_pubkey BYTEA CHECK (helpdesk_owner_agent_pubkey IS NULL OR length(helpdesk_owner_agent_pubkey) = 32),
     created_by            BYTEA NOT NULL CHECK (length(created_by) = 32),
     created_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at            TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -16,3 +19,7 @@ CREATE TABLE email_conversations (
     FOREIGN KEY (community_id, channel_id)
         REFERENCES channels (community_id, id)
 );
+
+CREATE UNIQUE INDEX idx_email_conversations_helpdesk_ticket
+    ON email_conversations (community_id, helpdesk_ticket_id)
+    WHERE helpdesk_ticket_id IS NOT NULL;
