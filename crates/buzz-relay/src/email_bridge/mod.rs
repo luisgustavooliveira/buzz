@@ -167,7 +167,11 @@ pub(crate) async fn try_ingest_hook(
     event: &Event,
     thread_meta: Option<&ThreadMetadataOwned>,
 ) -> Result<Option<EmailOutboxPlan>, IngestError> {
-    if single_tag_value(event, "buzz:email-action")? != Some("send") {
+    let action = single_tag_value(event, "buzz:email-action")?;
+    if action != Some("send") {
+        if action.is_none() {
+            return helpdesk::try_ingest_internal_note(tenant, state, event, thread_meta).await;
+        }
         return Ok(None);
     }
     let Some(config) = state.config.email.as_ref() else {
@@ -256,9 +260,12 @@ pub(crate) async fn try_ingest_hook(
             "invalid: email requires at least one recipient".into(),
         ));
     }
-    let helpdesk_conversation = existing
-        .as_ref()
-        .is_some_and(|conversation| conversation.helpdesk_ticket_id.is_some());
+    let helpdesk_conversation = existing.as_ref().is_some_and(|conversation| {
+        config
+            .helpdesk
+            .as_ref()
+            .is_some_and(|helpdesk| conversation.channel_id == helpdesk.channel_id)
+    });
     let participant = |address: &str, role: &str| {
         let account = config.account_for_address(address);
         let allowed = config.allowed_sender(address);

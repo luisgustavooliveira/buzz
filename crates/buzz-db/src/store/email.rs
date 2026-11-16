@@ -694,6 +694,10 @@ pub async fn mark_outbox_sent(
     let event_id: Vec<u8> = row.try_get("event_id")?;
     let internet_message_id: String = row.try_get("internet_message_id")?;
     let payload: serde_json::Value = row.try_get("payload")?;
+    if payload.get("operation").and_then(serde_json::Value::as_str) == Some("zammad_add_note") {
+        tx.commit().await?;
+        return Ok(());
+    }
     let mailbox_id = payload
         .get("mailbox_id")
         .and_then(serde_json::Value::as_str)
