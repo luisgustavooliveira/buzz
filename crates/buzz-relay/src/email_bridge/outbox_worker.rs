@@ -148,7 +148,9 @@ async fn deliver(state: &Arc<AppState>, row: buzz_db::email::EmailOutboxRow) {
                     ticket.number,
                     zammad.ticket_url(ticket.id)
                 );
-                post_email_note(&tenant, state, &conversation, &note).await
+                post_email_note(&tenant, state, &conversation, &note)
+                    .await
+                    .map(|_| ())
             }
             Some("zammad_add_article") => {
                 let zammad = bridge.helpdesk.as_ref().ok_or("helpdesk client missing")?;

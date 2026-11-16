@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use nostr::{EventBuilder, Kind, Tag};
 use serde::de::DeserializeOwned;
-use tracing::{info, warn};
+use tracing::info;
 use uuid::Uuid;
 
 use buzz_core::kind::KIND_STREAM_MESSAGE;
@@ -578,7 +578,10 @@ pub async fn process_notification(
             None => post_email_note(tenant, state, conversation, &text).await?,
         };
         for account in newly_added {
-            if Some(account) != owner_account(config, conversation)? {
+            if owner_account(config, conversation)?
+                .map(|owner| owner.agent_pubkey != account.agent_pubkey)
+                .unwrap_or(true)
+            {
                 let note = format!(
                     "Você foi incluído no ticket #{}; participe pela thread vinculada.",
                     conversation.helpdesk_ticket_number.as_deref().unwrap_or("")
