@@ -162,7 +162,7 @@ async fn deliver(state: &Arc<AppState>, row: buzz_db::email::EmailOutboxRow) {
                     .ok_or("helpdesk conversation missing")?;
                 let ticket_id = conversation.helpdesk_ticket_id.ok_or("helpdesk ticket ID missing")?;
                 zammad
-                    .add_internal_note(ticket_id, &row.payload)
+                    .add_public_note(ticket_id, &row.payload)
                     .await
                     .map(|_| None)
             }

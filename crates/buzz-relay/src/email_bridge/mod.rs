@@ -170,7 +170,7 @@ pub(crate) async fn try_ingest_hook(
     let action = single_tag_value(event, "buzz:email-action")?;
     if action != Some("send") {
         if action.is_none() {
-            return helpdesk::try_ingest_internal_note(tenant, state, event, thread_meta).await;
+            return helpdesk::try_ingest_public_note(tenant, state, event, thread_meta).await;
         }
         return Ok(None);
     }
