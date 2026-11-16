@@ -317,7 +317,12 @@ pub(crate) async fn try_ingest_hook(
     };
     let internet_message_id = format!("<{}@{}>", Uuid::new_v4(), config.message_id_domain);
     let references = if helpdesk_conversation {
-        serde_json::json!(parent_message_id.as_ref().map(|id| vec![id.clone()]).unwrap_or_default())
+        serde_json::json!(
+            parent_message_id
+                .as_ref()
+                .map(|id| vec![id.clone()])
+                .unwrap_or_default()
+        )
     } else {
         serde_json::json!(parent_message_id)
     };
