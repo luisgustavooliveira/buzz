@@ -13,7 +13,7 @@ import snpsMarkUrl from "./snps/snps-mark.png";
 export type BrandId = "buzz" | "snps";
 
 export const BRAND: BrandId =
-  import.meta.env.VITE_BUZZ_BRAND === "snps" ? "snps" : "buzz";
+  import.meta.env?.VITE_BUZZ_BRAND === "snps" ? "snps" : "buzz";
 
 /** True when the frontend was built for the SNPS distribution. */
 export const isSnpsBrand = BRAND === "snps";
