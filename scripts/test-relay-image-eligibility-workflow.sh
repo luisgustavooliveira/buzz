@@ -29,6 +29,10 @@ require_literal '- "deploy/charts/buzz/Chart.yaml"'
 require_literal '- "scripts/create-deployment-eligibility-predicate.jq"'
 require_literal '- "scripts/select-qualified-ci-run.jq"'
 require_literal '- "scripts/test-relay-image-eligibility-workflow.sh"'
+require_literal "  PUSH_GATEWAY_IMAGE_NAME: \${{ vars.GHCR_PUSH_GATEWAY_IMAGE != '' && vars.GHCR_PUSH_GATEWAY_IMAGE || 'ghcr.io/block/buzz-push-gateway' }}"
+require_literal '          images: ${{ env.PUSH_GATEWAY_IMAGE_NAME }}'
+require_literal '          cache-from: type=registry,ref=${{ env.PUSH_GATEWAY_IMAGE_NAME }}-buildcache:${{ matrix.arch }}'
+require_literal "format('type=registry,ref={0}-buildcache:{1},mode=max,compression=zstd', env.PUSH_GATEWAY_IMAGE_NAME, matrix.arch)"
 
 # Main pushes may skip only paths Docker never sees. The push filter must be, in
 # order: "**", then directory exclusions that .dockerignore also excludes, then
