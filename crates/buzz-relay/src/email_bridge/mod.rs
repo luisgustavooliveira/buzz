@@ -5,6 +5,7 @@
 //! event, conversation, participants and outbox atomically. V1 rejects external
 //! senders even when they present valid threading headers.
 
+pub mod helpdesk;
 pub mod inbound;
 pub mod outbox_worker;
 pub mod smtp;
@@ -31,6 +32,8 @@ pub struct BridgeState {
     pub smtp: Arc<smtp::PostalClient>,
     /// Graph client when inbound is enabled.
     pub graph: Option<Arc<inbound::GraphClient>>,
+    /// Zammad client when shared-mailbox helpdesk ingress is configured.
+    pub helpdesk: Option<Arc<helpdesk::ZammadClient>>,
     /// Expected Graph webhook clientState.
     pub graph_client_state: Option<Vec<u8>>,
 }
@@ -57,9 +60,18 @@ impl BridgeState {
             }
             None => (None, None),
         };
+        let helpdesk = config
+            .helpdesk
+            .as_ref()
+            .map(|helpdesk| {
+                read_secret(&helpdesk.api_token_path)
+                    .map(|token| Arc::new(helpdesk::ZammadClient::new(helpdesk, token)))
+            })
+            .transpose()?;
         Ok(Self {
             smtp: Arc::new(smtp),
             graph,
+            helpdesk,
             graph_client_state,
         })
     }
@@ -99,6 +111,7 @@ impl EmailOutboxPlan {
                 created_by: &self.created_by,
                 is_new: self.is_new,
                 participants: &self.participants,
+                helpdesk_owner_agent_pubkey: None,
             },
             event_id: event.id.as_bytes(),
             author_pubkey: event.pubkey.as_bytes(),
@@ -243,12 +256,19 @@ pub(crate) async fn try_ingest_hook(
             "invalid: email requires at least one recipient".into(),
         ));
     }
+    let helpdesk_conversation = existing
+        .as_ref()
+        .is_some_and(|conversation| conversation.helpdesk_ticket_id.is_some());
     let participant = |address: &str, role: &str| {
         let account = config.account_for_address(address);
         let allowed = config.allowed_sender(address);
+        let internal_recipient = address
+            .rsplit_once('@')
+            .is_some_and(|(_, domain)| domain.eq_ignore_ascii_case(&config.message_id_domain));
         let Some((participant_type, pubkey)) = (match (account, allowed) {
             (Some(account), _) => Some(("relay", Some(account.agent_pubkey.clone()))),
             (None, Some(sender)) => Some(("relay", Some(sender.pubkey.clone()))),
+            (None, None) if helpdesk_conversation && internal_recipient => Some(("external", None)),
             (None, None) => None,
         }) else {
             return Err(IngestError::Rejected(format!(
@@ -274,6 +294,14 @@ pub(crate) async fn try_ingest_hook(
     }];
     for (role, addresses) in [("to", &to), ("cc", &cc), ("bcc", &bcc)] {
         for address in addresses {
+            if helpdesk_conversation
+                && config
+                    .helpdesk
+                    .as_ref()
+                    .is_some_and(|helpdesk| address == &helpdesk.inbox_address)
+            {
+                continue;
+            }
             participants.push(participant(address, role)?);
         }
     }
@@ -288,18 +316,26 @@ pub(crate) async fn try_ingest_hook(
         None => None,
     };
     let internet_message_id = format!("<{}@{}>", Uuid::new_v4(), config.message_id_domain);
+    let references = if helpdesk_conversation {
+        serde_json::json!(parent_message_id.as_ref().map(|id| vec![id.clone()]).unwrap_or_default())
+    } else {
+        serde_json::json!(parent_message_id)
+    };
     let payload = serde_json::json!({
+        "operation": if helpdesk_conversation { "zammad_add_article" } else { "smtp_send" },
         "from_address": from_address,
-        "display_name": display_name,
-        "mailbox_id": mailbox_id,
+        "display_name": display_name.clone(),
+        "sender_name": display_name,
+        "sender_is_agent": account.is_some(),
+        "mailbox_id": if helpdesk_conversation { config.helpdesk.as_ref().map(|helpdesk| helpdesk.mailbox_id.clone()).unwrap_or(mailbox_id) } else { mailbox_id },
         "subject": subject,
         "body": event.content,
         "to": to,
         "cc": cc,
         "bcc": bcc,
         "internet_message_id": internet_message_id,
-        "in_reply_to": parent_message_id.clone(),
-        "references": parent_message_id,
+        "in_reply_to": parent_message_id,
+        "references": references,
         "conversation_id": conversation_id,
     });
     info!(event_id = %event.id, %conversation_id, "email bridge: send enqueued");

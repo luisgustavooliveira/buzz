@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use tracing::warn;
 
 use crate::email_bridge::inbound::{
-    mailbox_from_resource, process_notification, GraphNotificationPayload,
+    GraphNotificationPayload, mailbox_from_resource, process_notification,
 };
 use crate::state::AppState;
 
@@ -57,7 +57,7 @@ pub async fn graph_webhook(
     let payload: GraphNotificationPayload = match serde_json::from_slice(&body) {
         Ok(payload) => payload,
         Err(_) => {
-            return super::api_error(StatusCode::BAD_REQUEST, "invalid JSON body").into_response()
+            return super::api_error(StatusCode::BAD_REQUEST, "invalid JSON body").into_response();
         }
     };
     let Some(config) = state.config.email.as_ref() else {
@@ -82,6 +82,34 @@ pub async fn graph_webhook(
         let Some(mailbox_id) = mailbox_from_resource(&notification.resource) else {
             continue;
         };
+        if let Some(helpdesk) = config
+            .helpdesk
+            .as_ref()
+            .filter(|helpdesk| helpdesk.mailbox_id.eq_ignore_ascii_case(&mailbox_id))
+        {
+            if helpdesk.graph_subscription_id.to_string() != notification.subscription_id {
+                warn!(mailbox_id = %helpdesk.mailbox_id, "helpdesk Graph webhook: unexpected subscription");
+                continue;
+            }
+            if let Err(error) = crate::email_bridge::helpdesk::process_notification(
+                &tenant,
+                &state,
+                config,
+                helpdesk,
+                notification,
+            )
+            .await
+            {
+                warn!(error = %crate::email_bridge::truncate_chars(&error, 256),
+                    "helpdesk Graph notification processing failed");
+                return super::api_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "temporarily unavailable",
+                )
+                .into_response();
+            }
+            continue;
+        }
         let Some(account) = config.account_for_mailbox(&mailbox_id) else {
             continue;
         };

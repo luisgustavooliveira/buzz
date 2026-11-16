@@ -1753,7 +1753,12 @@ mod postgres_tests {
             assert!(desired_schema.contains(&format!("CREATE TABLE {table}")));
         }
         assert!(email_bridge.contains("external_enabled      BOOLEAN NOT NULL DEFAULT FALSE"));
-        assert_eq!(fork.len(), 2);
+        assert_eq!(fork[2].version, 9003);
+        let helpdesk_bridge = fork[2].sql.as_str();
+        assert!(helpdesk_bridge.contains("ADD COLUMN helpdesk_ticket_id BIGINT"));
+        assert!(helpdesk_bridge.contains("helpdesk_owner_agent_pubkey BYTEA"));
+        assert!(desired_schema.contains("helpdesk_ticket_id"));
+        assert_eq!(fork.len(), 3);
     }
 
     #[test]
