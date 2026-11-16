@@ -749,7 +749,7 @@ mod tests {
                 graph_subscription_id: None,
             },
         ];
-        let to = vec![
+        let to: Vec<String> = vec![
             "helpdesk@example.org".into(),
             "one@example.org".into(),
             "two@example.org".into(),
