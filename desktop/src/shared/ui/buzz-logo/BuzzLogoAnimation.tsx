@@ -1,6 +1,7 @@
 import { useId, useLayoutEffect, useRef } from "react";
 import type { CSSProperties } from "react";
 import "./buzz-logo-animation.css";
+import { BrandMarkImage, isSnpsBrand } from "@/shared/branding/brand";
 
 const LOOP = "indefinite";
 const EASE = ".16 1 .3 1";
@@ -621,7 +622,30 @@ function RestWindowFade({
   );
 }
 
-export default function BuzzLogoAnimation({
+export default function BuzzLogoAnimation(props: BuzzLogoAnimationProps) {
+  // Distributor builds swap the animated bee for their own static mark.
+  if (isSnpsBrand) {
+    // Keep the bee's compact default size and its "alive" pulse cue.
+    const className = props.className ?? "";
+    const animated = props.loop || /buzz-logo--(scale-)?pulse/.test(className);
+    return (
+      <BrandMarkImage
+        ariaLabel={props.ariaLabel ?? "Logo"}
+        className={[
+          "h-auto w-6",
+          animated && "motion-safe:animate-pulse",
+          className,
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        style={props.style}
+      />
+    );
+  }
+  return <BuzzBeeLogoAnimation {...props} />;
+}
+
+function BuzzBeeLogoAnimation({
   ariaLabel = "Buzz logo animation",
   className = "",
   fullScreen = true,

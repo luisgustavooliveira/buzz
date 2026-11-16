@@ -1,3 +1,4 @@
+import { BRAND_THEME_LABEL } from "@/shared/branding/brand";
 import { useMemo, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import {
@@ -237,6 +238,9 @@ export const settingsSections: SettingsSectionDescriptor[] = [
 ];
 
 function formatThemeLabel(name: string): string {
+  // The first-party theme carries the distributor's name in branded builds.
+  if (name === "buzz") return BRAND_THEME_LABEL;
+  if (name === "buzz-dark") return `${BRAND_THEME_LABEL} Dark`;
   return name
     .split("-")
     .map((w) => w.charAt(0).toUpperCase() + w.slice(1))

@@ -1,3 +1,4 @@
+import { BRAND_APP_ICON_SRC } from "@/shared/branding/brand";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Check,
@@ -492,7 +493,7 @@ export function MobilePairingCard({
               ) : step === "qr" && qrUri ? (
                 <StyledQrCode
                   animate
-                  centerImageSrc="/app-icon@2x.png"
+                  centerImageSrc={BRAND_APP_ICON_SRC}
                   data-testid="mobile-pairing-qr"
                   size={240}
                   title="Mobile pairing QR code"

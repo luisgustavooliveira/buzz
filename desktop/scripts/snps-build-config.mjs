@@ -12,7 +12,23 @@ export const snpsBuildIdentity = Object.freeze({
   cliName: "buzz-demo-snps",
   relayWsUrl: "wss://message-relay.snpsgroup.com",
   relayHttpUrl: "https://message-relay.snpsgroup.com",
+  frontendBrand: "snps",
 });
+
+/**
+ * SNPS app/installer icons. CI generates them from
+ * `desktop/branding/snps/app-icon-source.png` with `tauri icon` into this
+ * directory (relative to `src-tauri`), so the upstream `icons/` stay untouched.
+ */
+export const snpsIconDir = "icons-snps";
+export const snpsIconSource = "branding/snps/app-icon-source.png";
+const snpsBundleIcons = [
+  "32x32.png",
+  "128x128.png",
+  "128x128@2x.png",
+  "icon.icns",
+  "icon.ico",
+].map((name) => `${snpsIconDir}/${name}`);
 
 export function snpsBuildConfig() {
   return {
@@ -27,7 +43,13 @@ export function snpsBuildConfig() {
       },
       bundle: {
         createUpdaterArtifacts: false,
-        windows: { nsis: { installMode: "currentUser" } },
+        icon: snpsBundleIcons,
+        windows: {
+          nsis: {
+            installMode: "currentUser",
+            installerIcon: `${snpsIconDir}/icon.ico`,
+          },
+        },
       },
     },
   };
