@@ -188,18 +188,27 @@ impl ZammadClient {
         ticket_id: i64,
         payload: &serde_json::Value,
     ) -> Result<(), String> {
-        let _sender = required_string(payload, "from_address")?;
+        let sender = required_string(payload, "from_address")?;
         let owner = payload
             .get("owner_address")
             .and_then(serde_json::Value::as_str)
             .filter(|value| !value.is_empty())
             .unwrap_or(&self.config.fallback_agent_address);
+        let acting_agent = if payload
+            .get("sender_is_agent")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            sender
+        } else {
+            owner
+        };
         let article = article_from_payload(payload, Some(ticket_id), false);
         self.request(
             reqwest::Method::POST,
             &["ticket_articles"],
             None,
-            Some(owner),
+            Some(acting_agent),
             Some(&article),
             true,
         )
