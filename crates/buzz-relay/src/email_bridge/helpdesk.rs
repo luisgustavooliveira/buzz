@@ -363,6 +363,14 @@ fn message_payload(
     })
 }
 
+fn direct_owner<'a>(
+    accounts: &'a [EmailAccountConfig],
+    to: &[String],
+) -> Option<&'a EmailAccountConfig> {
+    to.iter()
+        .find_map(|address| accounts.iter().find(|account| &account.address == address))
+}
+
 fn participant(
     config: &EmailConfig,
     address: &str,
@@ -522,9 +530,7 @@ pub async fn process_notification(
     {
         return Ok(());
     }
-    let owner = to
-        .iter()
-        .find_map(|address| config.account_for_address(address));
+    let owner = direct_owner(&config.accounts, &to);
     let payload = message_payload(config, helpdesk, &message, &sender, &body, owner);
     let conversations = state
         .db
@@ -768,9 +774,7 @@ mod tests {
             "one@example.org".into(),
             "two@example.org".into(),
         ];
-        let owner = to
-            .iter()
-            .find_map(|address| accounts.iter().find(|account| &account.address == address));
+        let owner = direct_owner(&accounts, &to);
         assert_eq!(
             owner.map(|account| account.address.as_str()),
             Some("one@example.org")
