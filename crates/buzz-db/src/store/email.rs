@@ -228,6 +228,25 @@ pub async fn get_conversation(
     row.map(|row| row_to_conversation(&row)).transpose()
 }
 
+/// Fetch a conversation by its external helpdesk ticket ID.
+pub async fn get_conversation_by_helpdesk_ticket(
+    pool: &PgPool,
+    community_id: CommunityId,
+    ticket_id: i64,
+) -> Result<Option<EmailConversation>> {
+    let row = sqlx::query(
+        r#"SELECT community_id, id, channel_id, root_event_id, status, external_enabled,
+                  helpdesk_ticket_id, helpdesk_ticket_number, helpdesk_owner_agent_pubkey
+           FROM email_conversations
+           WHERE community_id = $1 AND helpdesk_ticket_id = $2"#,
+    )
+    .bind(community_id.as_uuid())
+    .bind(ticket_id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(|row| row_to_conversation(&row)).transpose()
+}
+
 /// Resolve all conversations referenced by Message-IDs. Zero or multiple rows
 /// are both non-routable; the caller decides how to quarantine each case.
 pub async fn find_conversations_for_message_ids(
@@ -781,6 +800,15 @@ impl Db {
         id: Uuid,
     ) -> Result<Option<EmailConversation>> {
         get_conversation(&self.pool, community_id, id).await
+    }
+
+    /// Fetch a conversation by its external helpdesk ticket ID.
+    pub async fn email_get_conversation_by_helpdesk_ticket(
+        &self,
+        community_id: CommunityId,
+        ticket_id: i64,
+    ) -> Result<Option<EmailConversation>> {
+        get_conversation_by_helpdesk_ticket(&self.pool, community_id, ticket_id).await
     }
 
     /// Save a successfully created helpdesk ticket for retry-safe routing.

@@ -776,6 +776,232 @@ pub async fn process_notification(
     Ok(())
 }
 
+/// Zammad app article webhook payload.
+#[derive(Debug, serde::Deserialize)]
+pub struct ZammadWebhookPayload {
+    /// Ticket containing the article.
+    pub ticket: ZammadWebhookTicket,
+    /// Newly created article.
+    pub article: ZammadWebhookArticle,
+}
+
+/// Ticket fields used for conversation routing.
+#[derive(Debug, serde::Deserialize)]
+pub struct ZammadWebhookTicket {
+    /// Numeric ticket ID.
+    pub id: i64,
+    /// Human-readable ticket number.
+    pub number: Option<String>,
+    /// Ticket title.
+    pub title: Option<String>,
+}
+
+/// Article fields used for app-to-Buzz mirroring.
+#[derive(Debug, serde::Deserialize)]
+pub struct ZammadWebhookArticle {
+    /// Numeric article ID.
+    pub id: i64,
+    /// Owning ticket ID.
+    pub ticket_id: i64,
+    /// Article type; only `note` is accepted from this webhook.
+    #[serde(rename = "type")]
+    pub article_type: String,
+    /// Zammad visibility flag.
+    pub internal: bool,
+    /// Article body.
+    pub body: Option<String>,
+    /// Body content type.
+    pub content_type: Option<String>,
+    /// Article subject.
+    pub subject: Option<String>,
+    /// Display sender.
+    pub from: Option<String>,
+    /// User who created the article.
+    pub created_by: Option<ZammadWebhookUser>,
+}
+
+/// User metadata embedded in a Zammad webhook.
+#[derive(Debug, serde::Deserialize)]
+pub struct ZammadWebhookUser {
+    /// Login email.
+    pub email: Option<String>,
+    /// First name.
+    pub firstname: Option<String>,
+    /// Last name.
+    pub lastname: Option<String>,
+}
+
+fn app_html_text(value: &str) -> String {
+    let lower = value.to_ascii_lowercase();
+    let mut output = String::new();
+    let mut cursor = 0;
+    while let Some(relative_start) = lower[cursor..].find('<') {
+        let start = cursor + relative_start;
+        output.push_str(&value[cursor..start]);
+        let Some(relative_end) = lower[start..].find('>') else {
+            output.push_str(&value[start..]);
+            cursor = value.len();
+            break;
+        };
+        let end = start + relative_end;
+        let tag = lower[start..=end].trim();
+        if tag.starts_with("<br") || tag.starts_with("</p") || tag.starts_with("</div") {
+            output.push('\n');
+        }
+        cursor = end + 1;
+        if cursor >= value.len() {
+            break;
+        }
+    }
+    if cursor < value.len() {
+        output.push_str(&value[cursor..]);
+    }
+    output
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("\r\n", "\n")
+        .split('\n')
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .chars()
+        .take(super::INBOUND_BODY_MAX_CHARS)
+        .collect()
+}
+
+/// Mirror a note created directly in the Zammad app back to its Buzz thread.
+pub async fn process_app_webhook(
+    tenant: &TenantContext,
+    state: &Arc<AppState>,
+    config: &EmailConfig,
+    helpdesk: &EmailHelpdeskConfig,
+    payload: &ZammadWebhookPayload,
+) -> Result<(), String> {
+    if payload.article.article_type != "note"
+        || payload.article.ticket_id != payload.ticket.id
+        || payload.article.subject.as_deref() == Some("Discussão Buzz")
+    {
+        return Ok(());
+    }
+    let raw_body = payload.article.body.as_deref().unwrap_or("");
+    let body = if payload
+        .article
+        .content_type
+        .as_deref()
+        .is_some_and(|value| value.eq_ignore_ascii_case("text/html"))
+    {
+        app_html_text(raw_body)
+    } else {
+        truncate_chars(raw_body, super::INBOUND_BODY_MAX_CHARS)
+            .trim()
+            .to_string()
+    };
+    if body.is_empty() {
+        return Ok(());
+    }
+    let conversation = state
+        .db
+        .email_get_conversation_by_helpdesk_ticket(tenant.community(), payload.ticket.id)
+        .await
+        .map_err(|e| format!("Zammad app conversation lookup: {e}"))?;
+    let Some(conversation) = conversation else {
+        return Ok(());
+    };
+    let synthetic_id = format!(
+        "<zammad-{}-{}@{}>",
+        payload.ticket.id, payload.article.id, config.message_id_domain
+    );
+    if state
+        .db
+        .email_inbound_message_is_delivered(tenant.community(), &synthetic_id, &helpdesk.mailbox_id)
+        .await
+        .map_err(|e| format!("Zammad app dedup: {e}"))?
+    {
+        return Ok(());
+    }
+    let user = payload.article.created_by.as_ref();
+    let sender = user
+        .and_then(|user| user.email.as_deref())
+        .and_then(crate::config::canonical_email_address)
+        .unwrap_or_default();
+    let sender_name = user
+        .map(|user| {
+            format!(
+                "{} {}",
+                user.firstname.as_deref().unwrap_or(""),
+                user.lastname.as_deref().unwrap_or("")
+            )
+        })
+        .map(|name| name.trim().to_string())
+        .filter(|name| !name.is_empty())
+        .or(payload.article.from.clone())
+        .unwrap_or_else(|| "usuário do app".into());
+    let sender_name = truncate_chars(sender_name.replace(['\r', '\n'], " ").as_str(), 200);
+    let graph_article_id = format!("zammad:{}", payload.article.id);
+    state
+        .db
+        .email_record_inbound_message(
+            tenant.community(),
+            buzz_db::email::InboundMessageInsert {
+                internet_message_id: &synthetic_id,
+                mailbox_id: &helpdesk.mailbox_id,
+                conversation_id: conversation.id,
+                parent_message_id: None,
+                sender_address: &sender,
+                graph_message_id: &graph_article_id,
+            },
+        )
+        .await
+        .map_err(|e| format!("Zammad app inbound insert: {e}"))?;
+    let kind = if payload.article.internal {
+        "Nota interna pelo app do helpdesk"
+    } else {
+        "Comentário público pelo app do helpdesk"
+    };
+    let text = format!(
+        "{kind} — {sender_name}\n\n{body}\n\nTicket #{}.",
+        payload.ticket.number.as_deref().unwrap_or("")
+    );
+    let owner = owner_account(config, &conversation)?;
+    let sender_is_owner = match (&sender, owner) {
+        (sender, Some(account)) if !sender.is_empty() => sender == &account.address,
+        _ => false,
+    };
+    let event_id = match owner {
+        Some(account) if !sender_is_owner => {
+            post_email_message(
+                tenant,
+                state,
+                &conversation,
+                &text,
+                &account.agent_pubkey,
+                &account.owner_pubkey,
+            )
+            .await?
+        }
+        _ => post_email_note(tenant, state, &conversation, &text).await?,
+    };
+    let event_bytes = hex::decode(event_id).map_err(|e| e.to_string())?;
+    state
+        .db
+        .email_mark_inbound_delivered(
+            tenant.community(),
+            &synthetic_id,
+            &helpdesk.mailbox_id,
+            &event_bytes,
+        )
+        .await
+        .map_err(|e| format!("Zammad app delivered marker: {e}"))?;
+    metrics::counter!("buzz_email_inbound_total", "status" => "helpdesk_app_delivered")
+        .increment(1);
+    Ok(())
+}
+
 /// Mirror an ordinary participant reply as a public helpdesk note.
 pub(crate) async fn try_ingest_public_note(
     tenant: &TenantContext,
@@ -890,6 +1116,14 @@ mod tests {
         assert_eq!(
             owner.map(|account| account.address.as_str()),
             Some("one@example.org")
+        );
+    }
+
+    #[test]
+    fn app_html_is_mirrored_as_plain_text() {
+        assert_eq!(
+            app_html_text("<b>Aprovar</b><br><br>Atte.<div>Equipe &amp; parceiros</div>"),
+            "Aprovar\n\nAtte.\nEquipe & parceiros"
         );
     }
 }

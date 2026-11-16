@@ -34,6 +34,8 @@ pub struct BridgeState {
     pub graph: Option<Arc<inbound::GraphClient>>,
     /// Zammad client when shared-mailbox helpdesk ingress is configured.
     pub helpdesk: Option<Arc<helpdesk::ZammadClient>>,
+    /// Expected bearer token for Zammad app article webhooks.
+    pub helpdesk_webhook_token: Option<Vec<u8>>,
     /// Expected Graph webhook clientState.
     pub graph_client_state: Option<Vec<u8>>,
 }
@@ -68,10 +70,16 @@ impl BridgeState {
                     .map(|token| Arc::new(helpdesk::ZammadClient::new(helpdesk, token)))
             })
             .transpose()?;
+        let helpdesk_webhook_token = config
+            .helpdesk
+            .as_ref()
+            .map(|helpdesk| read_secret(&helpdesk.webhook_token_path).map(String::into_bytes))
+            .transpose()?;
         Ok(Self {
             smtp: Arc::new(smtp),
             graph,
             helpdesk,
+            helpdesk_webhook_token,
             graph_client_state,
         })
     }

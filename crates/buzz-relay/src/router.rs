@@ -564,6 +564,11 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // Microsoft Graph email notifications (clientState-authenticated).
         .route("/integrations/email/graph", post(api::email::graph_webhook))
+        // Zammad app articles (dedicated bearer token).
+        .route(
+            "/integrations/email/zammad",
+            post(api::email::zammad_webhook),
+        )
         // Mesh demo echo probe — testbed-only; 404 unless BUZZ_MESH=on and
         // BUZZ_MESH_DEMO_ECHO=on (see api::mesh_demo).
         .route("/_mesh/demo/echo", post(api::mesh_demo::demo_echo))

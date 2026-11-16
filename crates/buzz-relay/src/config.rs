@@ -241,6 +241,8 @@ pub struct EmailHelpdeskConfig {
     pub api_base_url: String,
     /// File containing the Zammad API token.
     pub api_token_path: std::path::PathBuf,
+    /// File containing the dedicated Zammad webhook bearer token.
+    pub webhook_token_path: std::path::PathBuf,
 }
 
 impl EmailConfig {
@@ -1277,6 +1279,7 @@ fn parse_email_config(
                 fallback_agent_address,
                 api_base_url,
                 api_token_path: required("BUZZ_EMAIL_HELPDESK_API_TOKEN_PATH")?.into(),
+                webhook_token_path: required("BUZZ_EMAIL_HELPDESK_WEBHOOK_TOKEN_PATH")?.into(),
             })
         }
         None => None,
