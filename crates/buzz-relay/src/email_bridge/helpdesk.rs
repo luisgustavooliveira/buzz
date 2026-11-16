@@ -941,7 +941,8 @@ pub async fn process_app_webhook(
         .filter(|name| !name.is_empty())
         .or(payload.article.from.clone())
         .unwrap_or_else(|| "usuário do app".into());
-    let sender_name = truncate_chars(sender_name.replace(['\r', '\n'], " ").as_str(), 200);
+    let sender_name = sender_name.replace(['\r', '\n'], " ");
+    let sender_name = truncate_chars(&sender_name, 200);
     let graph_article_id = format!("zammad:{}", payload.article.id);
     state
         .db
