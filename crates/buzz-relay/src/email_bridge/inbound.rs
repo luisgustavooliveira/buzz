@@ -14,7 +14,7 @@ use buzz_core::tenant::TenantContext;
 use crate::config::{EmailAccountConfig, EmailGraphConfig};
 use crate::state::AppState;
 
-use super::{INBOUND_BODY_MAX_CHARS, post_email_message, truncate_chars};
+use super::{post_email_message, truncate_chars, INBOUND_BODY_MAX_CHARS};
 
 /// One Graph webhook notification.
 #[derive(Debug, Clone, Deserialize)]

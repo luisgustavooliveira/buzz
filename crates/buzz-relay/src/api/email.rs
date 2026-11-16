@@ -9,7 +9,7 @@ use subtle::ConstantTimeEq;
 use tracing::warn;
 
 use crate::email_bridge::inbound::{
-    GraphNotificationPayload, mailbox_from_resource, process_notification,
+    mailbox_from_resource, process_notification, GraphNotificationPayload,
 };
 use crate::state::AppState;
 

@@ -11,8 +11,8 @@ use uuid::Uuid;
 use buzz_core::CommunityId;
 use buzz_datastore_tracing::datastore_span;
 
-use crate::Db;
 use crate::error::Result;
+use crate::Db;
 
 /// Conversation state. Closed conversations remain readable but accept no mail.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -668,15 +668,23 @@ pub async fn mark_outbox_failed(
 }
 
 /// Mark a row sent and register its Message-ID for inbound threading.
-pub async fn mark_outbox_sent(pool: &PgPool, community_id: CommunityId, id: Uuid) -> Result<()> {
+pub async fn mark_outbox_sent(
+    pool: &PgPool,
+    community_id: CommunityId,
+    id: Uuid,
+    delivered_message_id: Option<&str>,
+) -> Result<()> {
     let mut tx = pool.begin().await?;
     let row = sqlx::query(
-        r#"UPDATE email_outbox SET status = 'sent', sent_at = now(), last_error = NULL
+        r#"UPDATE email_outbox
+           SET status = 'sent', sent_at = now(), last_error = NULL,
+               internet_message_id = COALESCE($3, internet_message_id)
            WHERE community_id = $1 AND id = $2 AND status = 'pending'
            RETURNING conversation_id, event_id, internet_message_id, payload"#,
     )
     .bind(community_id.as_uuid())
     .bind(id)
+    .bind(delivered_message_id)
     .fetch_optional(&mut *tx)
     .await?;
     let Some(row) = row else {
@@ -831,9 +839,14 @@ impl Db {
         mark_outbox_failed(&self.pool, community_id, id, error).await
     }
 
-    /// Mark an email outbox row sent.
-    pub async fn email_mark_outbox_sent(&self, community_id: CommunityId, id: Uuid) -> Result<()> {
-        mark_outbox_sent(&self.pool, community_id, id).await
+    /// Mark an email outbox row sent, preserving the provider Message-ID.
+    pub async fn email_mark_outbox_sent(
+        &self,
+        community_id: CommunityId,
+        id: Uuid,
+        delivered_message_id: Option<&str>,
+    ) -> Result<()> {
+        mark_outbox_sent(&self.pool, community_id, id, delivered_message_id).await
     }
 
     /// Resolve conversations by email threading IDs.

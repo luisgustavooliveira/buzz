@@ -150,7 +150,7 @@ async fn deliver(state: &Arc<AppState>, row: buzz_db::email::EmailOutboxRow) {
                 );
                 post_email_note(&tenant, state, &conversation, &note)
                     .await
-                    .map(|_| ())
+                    .map(|_| None)
             }
             Some("zammad_add_article") => {
                 let zammad = bridge.helpdesk.as_ref().ok_or("helpdesk client missing")?;
@@ -161,18 +161,21 @@ async fn deliver(state: &Arc<AppState>, row: buzz_db::email::EmailOutboxRow) {
                     .map_err(|e| e.to_string())?
                     .ok_or("helpdesk conversation missing")?;
                 let ticket_id = conversation.helpdesk_ticket_id.ok_or("helpdesk ticket ID missing")?;
-                zammad.add_outgoing_article(ticket_id, &row.payload).await
+                zammad
+                    .add_outgoing_article(ticket_id, &row.payload)
+                    .await
+                    .map(Some)
             }
-            Some("smtp_send") | None => bridge.smtp.send(&row.payload).await,
+            Some("smtp_send") | None => bridge.smtp.send(&row.payload).await.map(|_| None),
             Some(operation) => Err(format!("unknown email outbox operation {operation}")),
         }
     }
     .await;
     match result {
-        Ok(()) => {
+        Ok(delivered_message_id) => {
             if let Err(error) = state
                 .db
-                .email_mark_outbox_sent(row.community_id, row.id)
+                .email_mark_outbox_sent(row.community_id, row.id, delivered_message_id.as_deref())
                 .await
             {
                 // SMTP succeeded. Retrying the whole row could duplicate the

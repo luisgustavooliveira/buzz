@@ -17,7 +17,7 @@ use crate::config::{EmailAccountConfig, EmailConfig, EmailHelpdeskConfig};
 use crate::handlers::ingest::ThreadMetadataOwned;
 use crate::state::AppState;
 
-use super::inbound::{GraphMessage, GraphNotification, QuarantineReason, threading_ids};
+use super::inbound::{threading_ids, GraphMessage, GraphNotification, QuarantineReason};
 use super::{post_email_message, post_email_note, truncate_chars};
 
 /// Minimal Zammad REST client with bounded responses.
@@ -105,7 +105,7 @@ impl ZammadClient {
                 reqwest::Method::GET,
                 &["users", "search"],
                 Some(&[("query", address)]),
-                None,
+                Some(address),
                 None,
                 false,
             )
@@ -155,12 +155,17 @@ impl ZammadClient {
         if !mention_ids.is_empty() {
             ticket["mentions"] = serde_json::json!(mention_ids);
         }
+        let acting_agent = if owner_address.is_empty() {
+            self.config.fallback_agent_address.as_str()
+        } else {
+            owner_address
+        };
         let response = self
             .request(
                 reqwest::Method::POST,
                 &["tickets"],
                 None,
-                None,
+                Some(acting_agent),
                 Some(&ticket),
                 true,
             )
@@ -202,19 +207,24 @@ impl ZammadClient {
         &self,
         ticket_id: i64,
         payload: &serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let sender = required_string(payload, "from_address")?;
         let article = article_from_payload(payload, Some(ticket_id), true);
-        self.request(
-            reqwest::Method::POST,
-            &["ticket_articles"],
-            None,
-            Some(sender),
-            Some(&article),
-            false,
-        )
-        .await?;
-        Ok(())
+        let response = self
+            .request(
+                reqwest::Method::POST,
+                &["ticket_articles"],
+                None,
+                Some(sender),
+                Some(&article),
+                false,
+            )
+            .await?;
+        response
+            .get("message_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| "Zammad article response has no Message-ID".into())
     }
 
     /// Public ticket URL derived from the configured API endpoint.

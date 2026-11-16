@@ -235,6 +235,8 @@ pub struct EmailHelpdeskConfig {
     pub channel_id: uuid::Uuid,
     /// Zammad group used for new tickets.
     pub group: String,
+    /// Agent context used to create unassigned tickets.
+    pub fallback_agent_address: String,
     /// Zammad REST API base URL.
     pub api_base_url: String,
     /// File containing the Zammad API token.
@@ -1101,6 +1103,7 @@ fn parse_email_config(
         graph_subscription_id: String,
         channel_id: String,
         group: String,
+        fallback_agent_address: String,
         api_base_url: String,
     }
     #[derive(serde::Deserialize)]
@@ -1252,6 +1255,10 @@ fn parse_email_config(
                     "helpdesk group must be a single line".into(),
                 ));
             }
+            let fallback_agent_address = canonical_email_address(&raw.fallback_agent_address)
+                .ok_or_else(|| {
+                    ConfigError::InvalidValue("invalid helpdesk fallback_agent_address".into())
+                })?;
             let api_base_url = raw.api_base_url.trim().trim_end_matches('/').to_string();
             let parsed = url::Url::parse(&api_base_url).map_err(|_| {
                 ConfigError::InvalidValue("helpdesk api_base_url is invalid".into())
@@ -1267,6 +1274,7 @@ fn parse_email_config(
                 graph_subscription_id,
                 channel_id,
                 group,
+                fallback_agent_address,
                 api_base_url,
                 api_token_path: required("BUZZ_EMAIL_HELPDESK_API_TOKEN_PATH")?.into(),
             })
