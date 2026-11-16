@@ -1,3 +1,4 @@
+import { BRAND_APP_ICON_SRC } from "@/shared/branding/brand";
 import * as React from "react";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -167,7 +168,7 @@ export function IdentityRecoveryPairing({
         {step === "qr" && qrUri ? (
           <StyledQrCode
             animate
-            centerImageSrc="/app-icon@2x.png"
+            centerImageSrc={BRAND_APP_ICON_SRC}
             data-testid="identity-recovery-qr"
             size={240}
             title="Desktop identity recovery QR code"

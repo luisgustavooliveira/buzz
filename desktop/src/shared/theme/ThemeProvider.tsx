@@ -1,3 +1,4 @@
+import { SNPS_ACCENT, isSnpsBrand } from "@/shared/branding/brand";
 import {
   type ReactNode,
   createContext,
@@ -323,7 +324,9 @@ function resolveEffectiveAccent(
   themeName: string,
   accentColor: string,
 ): string {
-  return isBuzzTheme(themeName) ? NEUTRAL_ACCENT : accentColor;
+  if (!isBuzzTheme(themeName)) return accentColor;
+  // Branded builds pin the first-party theme to the distributor's accent.
+  return isSnpsBrand ? SNPS_ACCENT : NEUTRAL_ACCENT;
 }
 
 /** Toggle the Buzz-specific gradient marker independently from glass. */

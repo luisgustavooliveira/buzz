@@ -202,6 +202,20 @@
 }
 
 /*
+ * Distributor branding (SNPS build, `VITE_BUZZ_BRAND=snps`).
+ *
+ * `applyBrandAttribute` marks <html data-brand="snps">; the first-party theme
+ * then paints the SNPS butterfly ramp (sky blue -> violet) instead of the Buzz
+ * honey ramp. Unlayered on purpose so it beats the `@layer base` tokens above.
+ */
+:root[data-brand="snps"] {
+  --buzz-gradient-light-top: #d3ecf9;
+  --buzz-gradient-light-bottom: #d6d4ee;
+  --buzz-gradient-dark-top: #133d5c;
+  --buzz-gradient-dark-bottom: #140f2a;
+}
+
+/*
  * Buzz theme - sidebar gradient.
  *
  * Buzz reuses the GitHub Light palette for every base color; its one

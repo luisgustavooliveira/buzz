@@ -1,5 +1,7 @@
 import { useId } from "react";
 
+import { BrandMarkImage, isSnpsBrand } from "@/shared/branding/brand";
+
 /**
  * The Buzz bee mark with flapping wings. Geometry is identical to the static
  * {@link BuzzMark} (v8 final keyframe) — the same silhouette, rendered in
@@ -22,6 +24,15 @@ import { useId } from "react";
  * to the static silhouette via the CSS media query.
  */
 export function FlappingBee({ className }: { className?: string }) {
+  // Distributor builds swap the bee for their own mark (see shared/branding).
+  return isSnpsBrand ? (
+    <BrandMarkImage className={className} />
+  ) : (
+    <FlappingBuzzBee className={className} />
+  );
+}
+
+function FlappingBuzzBee({ className }: { className?: string }) {
   const maskId = `flapping-bee-cutouts-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
   // Wing geometry from the 466x309 mark: circles r=91.7 at (91.7, 154.5) and

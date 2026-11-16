@@ -1,5 +1,7 @@
 import { useId } from "react";
 
+import { BrandMarkImage, isSnpsBrand } from "@/shared/branding/brand";
+
 /**
  * The finished Buzz mark as a plain static SVG — no SMIL, no scripting, no
  * animation machinery. Geometry matches the final keyframe of the
@@ -7,6 +9,15 @@ import { useId } from "react";
  * paints complete on the very first frame regardless of animation support.
  */
 export function BuzzMark({ className }: { className?: string }) {
+  // Distributor builds swap the bee for their own mark (see shared/branding).
+  return isSnpsBrand ? (
+    <BrandMarkImage className={className} />
+  ) : (
+    <BuzzBeeMark className={className} />
+  );
+}
+
+function BuzzBeeMark({ className }: { className?: string }) {
   const maskId = `buzz-mark-cutouts-${useId().replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
   return (

@@ -113,6 +113,15 @@ jobs:
         shell: bash
         run: node desktop/scripts/snps-build-config.mjs desktop/src-tauri/tauri.snps.conf.json
 
+      # SNPS icons are generated from the company mark so the upstream
+      # `icons/` stay untouched; the SNPS config points the bundle here.
+      - name: Generate SNPS app and installer icons
+        shell: bash
+        run: |
+          cd desktop
+          pnpm tauri icon branding/snps/app-icon-source.png -o src-tauri/icons-snps
+          test -s src-tauri/icons-snps/icon.ico
+
       - name: Build sidecars
         shell: bash
         run: |
@@ -133,6 +142,7 @@ jobs:
           BUZZ_RELAY_HTTP: https://message-relay.snpsgroup.com
           BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY: "1"
           BUZZ_BUILD_DEMO_SLUG: snps
+          VITE_BUZZ_BRAND: snps
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
       # A Windows absolute frontendDist once parsed as a URL and Tauri silently

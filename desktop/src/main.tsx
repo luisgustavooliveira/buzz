@@ -14,6 +14,7 @@ import { migrateLegacyCommunityStorageBeforeRender } from "@/features/communitie
 import { CommunitiesProvider } from "@/features/communities/useCommunities";
 import { huddleWindowChannelId } from "@/features/huddle/lib/huddleWindow";
 import { CommunityOnboardingProvider } from "@/features/onboarding/communityOnboarding";
+import { applyBrandAttribute } from "@/shared/branding/brand";
 import { ThemeProvider } from "@/shared/theme/ThemeProvider";
 import { AvatarClipPaths } from "@/shared/ui/AvatarClipPaths";
 import { EmojiBurstProvider } from "@/shared/ui/EmojiBurstProvider";
@@ -81,6 +82,7 @@ function configureDevE2eBridgeFromUrl() {
 }
 
 function renderApp() {
+  applyBrandAttribute();
   ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
     <React.StrictMode>
       {/* block/buzz#5078 — catch any uncaught render error so a WebKit
