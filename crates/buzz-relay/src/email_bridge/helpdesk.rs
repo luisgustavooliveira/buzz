@@ -845,7 +845,12 @@ fn app_html_text(value: &str) -> String {
         };
         let end = start + relative_end;
         let tag = lower[start..=end].trim();
-        if tag.starts_with("<br") || tag.starts_with("</p") || tag.starts_with("</div") {
+        if tag.starts_with("<br")
+            || tag.starts_with("<p")
+            || tag.starts_with("</p")
+            || tag.starts_with("<div")
+            || tag.starts_with("</div")
+        {
             output.push('\n');
         }
         cursor = end + 1;
