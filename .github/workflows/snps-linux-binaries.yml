@@ -1,0 +1,139 @@
+name: SNPS Linux Binaries
+
+# Builds the SNPS fork's Linux x86_64 CLI/agent/relay binaries from the parent
+# commit of this workflow commit (the workflow lives on a branch whose only
+# change on top of the product source is this file), and hands them over as an
+# artifact with SHA256SUMS.txt. The SNPS operator publishes the artifact to the
+# internal release bucket, so no storage credential lives in GitHub.
+#
+# Runner: ubuntu-22.04 (glibc 2.35). Binaries linked against an older glibc run
+# on newer distros (the SNPS hosts run Ubuntu 24.04, glibc 2.39), never the
+# reverse, so the build host must not be newer than the oldest target host.
+# The "Check glibc floor" step enforces this on the produced ELF files.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["ci/snps-linux-binaries"]
+    paths:
+      - ".github/workflows/snps-linux-binaries.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Linux binaries (x86_64-unknown-linux-gnu)
+    if: github.repository == 'luisgustavooliveira/buzz'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-unknown-linux-gnu
+      MAX_GLIBC: "2.35"
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Resolve source commit and tag
+        id: src
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Only this workflow file may differ from the source commit, so the
+          # binaries are built from the parent's product code, untouched.
+          SOURCE_SHA=$(git rev-parse HEAD^)
+          CHANGED=$(git diff --name-only "$SOURCE_SHA" HEAD)
+          if [[ "$CHANGED" != ".github/workflows/snps-linux-binaries.yml" ]]; then
+            echo "::error::Unexpected changes on top of $SOURCE_SHA: $CHANGED"
+            exit 1
+          fi
+          git checkout --detach "$SOURCE_SHA"
+          echo "source_sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=snps-${SOURCE_SHA::12}" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -o Acquire::Retries=3
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            build-essential cmake pkg-config libssl-dev ca-certificates git
+
+      - name: Install Rust toolchain (rust-toolchain.toml)
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add "$TARGET"
+          rustc --version && cargo --version
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          shared-key: snps-linux-binaries-v1
+          cache-on-failure: true
+
+      - name: Build release binaries
+        shell: bash
+        env:
+          BUZZ_SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
+          BUZZ_BUILD_ID: github-actions:${{ github.run_id }}:${{ github.run_attempt }}
+          BUZZ_BUILD_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/attempts/${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --target "$TARGET" \
+            -p buzz-cli --bin buzz \
+            -p buzz-acp --bin buzz-acp \
+            -p buzz-dev-mcp --bin buzz-dev-mcp \
+            -p buzz-admin --bin buzz-admin \
+            -p buzz-relay --bin buzz-relay \
+            -p buzz-pair-relay --bin buzz-pair-relay
+
+      - name: Stage, strip and checksum
+        shell: bash
+        env:
+          TAG: ${{ steps.src.outputs.tag }}
+          SOURCE_SHA: ${{ steps.src.outputs.source_sha }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for b in buzz buzz-acp buzz-dev-mcp buzz-admin buzz-relay buzz-pair-relay; do
+            install -m 0755 "target/$TARGET/release/$b" "dist/$b"
+            strip "dist/$b"
+          done
+          GLIBC=$(ldd --version | head -1 | awk '{print $NF}')
+          RUSTC=$(rustc --version)
+          export TAG SOURCE_SHA GLIBC RUSTC
+          node -e 'require("node:fs").writeFileSync("dist/BUILD-INFO.json", JSON.stringify({tag: process.env.TAG, source_sha: process.env.SOURCE_SHA, workflow_sha: process.env.GITHUB_SHA, run_id: process.env.GITHUB_RUN_ID, target: process.env.TARGET, runner_glibc: process.env.GLIBC, rustc: process.env.RUSTC}, null, 2) + "\n")'
+          cd dist && sha256sum ./* > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Check glibc floor and smoke-run
+        shell: bash
+        run: |
+          set -euo pipefail
+          for b in buzz buzz-acp buzz-dev-mcp buzz-admin buzz-relay buzz-pair-relay; do
+            need=$(objdump -T "dist/$b" | grep -oE 'GLIBC_[0-9]+\.[0-9]+(\.[0-9]+)?' | sed 's/GLIBC_//' | sort -V | tail -1)
+            echo "$b requires glibc >= ${need:-none}"
+            if [[ -n "$need" ]] && [[ "$(printf '%s\n%s\n' "$need" "$MAX_GLIBC" | sort -V | tail -1)" != "$MAX_GLIBC" ]]; then
+              echo "::error::$b requires glibc $need > $MAX_GLIBC"
+              exit 1
+            fi
+          done
+          for b in buzz buzz-acp buzz-admin; do
+            "dist/$b" --help > /dev/null
+          done
+          dist/buzz email --help > /dev/null
+          # buzz-dev-mcp has no CLI flags (MCP stdio server): smoke it with an
+          # MCP initialize handshake instead of --help.
+          init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"smoke","version":"0"}}}'
+          reply=$(printf '%s\n' "$init" | timeout 30 dist/buzz-dev-mcp 2>/dev/null || true)
+          [[ "$reply" == *'"serverInfo"'* ]] || { echo "::error::buzz-dev-mcp did not answer initialize"; exit 1; }
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: buzz-linux-x86_64-${{ steps.src.outputs.tag }}
+          path: dist
+          if-no-files-found: error
+          retention-days: 30
