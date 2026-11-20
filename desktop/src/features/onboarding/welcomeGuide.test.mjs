@@ -5,10 +5,13 @@ import {
   activateWelcomeTeamPersonasSequentially,
   buildWelcomeStarterCreateInput,
   LEGACY_WELCOME_GUIDE_SYSTEM_PROMPT,
+  normalizeDisplayName,
   pickWelcomeGuideAgent,
   pickWelcomeGuideAgentForRelay,
   pickWelcomeTeamStarterAgentForRelay,
+  resolveWelcomeStarterDisplayName,
   welcomeStarterRuntimeUpdate,
+  welcomeTeamSeedDisabled,
   welcomeTeammateAccessUpdate,
   welcomeTeammateHasExpectedAccess,
   WELCOME_GUIDE_AGENT_NAME,
@@ -451,4 +454,45 @@ test("owner-only-access policy accepts provider Welcome teammates", () => {
   });
   assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, true), true);
   assert.equal(welcomeTeammateHasExpectedAccess(teammate, PUB_B, false), false);
+});
+
+test("resolveWelcomeStarterDisplayName keeps the canonical name when free", () => {
+  assert.equal(resolveWelcomeStarterDisplayName("Fizz", []), "Fizz");
+  assert.equal(resolveWelcomeStarterDisplayName("Fizz", ["Honey"]), "Fizz");
+});
+
+test("resolveWelcomeStarterDisplayName takes the next free variant on collision", () => {
+  assert.equal(resolveWelcomeStarterDisplayName("Fizz", ["Fizz"]), "Fizz-2");
+  assert.equal(
+    resolveWelcomeStarterDisplayName("Fizz", ["Fizz", "Fizz-2"]),
+    "Fizz-3",
+  );
+});
+
+test("resolveWelcomeStarterDisplayName reuses gaps left by retired installs", () => {
+  assert.equal(
+    resolveWelcomeStarterDisplayName("Fizz", ["Fizz", "Fizz-2", "Fizz-4"]),
+    "Fizz-3",
+  );
+});
+
+test("resolveWelcomeStarterDisplayName compares names case and whitespace insensitively", () => {
+  assert.equal(resolveWelcomeStarterDisplayName("Fizz", [" fizz "]), "Fizz-2");
+  assert.equal(resolveWelcomeStarterDisplayName("Honey", ["HONEY-2"]), "Honey");
+});
+
+test("resolveWelcomeStarterDisplayName suffixes per starter independently", () => {
+  const taken = ["Fizz", "Fizz-2"];
+  assert.equal(resolveWelcomeStarterDisplayName("Fizz", taken), "Fizz-3");
+  assert.equal(resolveWelcomeStarterDisplayName("Honey", taken), "Honey");
+});
+
+test("normalizeDisplayName tolerates nullish values", () => {
+  assert.equal(normalizeDisplayName(null), "");
+  assert.equal(normalizeDisplayName(undefined), "");
+  assert.equal(normalizeDisplayName("  Fizz\t"), "fizz");
+});
+
+test("welcomeTeamSeedDisabled defaults to enabled outside release builds", () => {
+  assert.equal(welcomeTeamSeedDisabled(), false);
 });
