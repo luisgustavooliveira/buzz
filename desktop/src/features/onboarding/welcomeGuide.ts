@@ -12,13 +12,16 @@ import {
 import { discoverAcpRuntimes } from "@/shared/api/tauriAcpDiscovery";
 import { getAgentAccessOwnerOnly } from "@/shared/api/tauriAgentAccess";
 import { getGlobalAgentConfig } from "@/shared/api/tauriGlobalAgentConfig";
+import { listArchivedIdentities } from "@/shared/api/tauriIdentityArchive";
 import { listPersonas, setPersonaActive } from "@/shared/api/tauriPersonas";
+import { searchUsers } from "@/shared/api/tauriProfiles";
 import type {
   AcpRuntime,
   AgentPersona,
   CreateManagedAgentInput,
   ManagedAgent,
   UpdateManagedAgentInput,
+  UserSearchResult,
 } from "@/shared/api/types";
 import { normalizePubkey } from "@/shared/lib/pubkey";
 
@@ -50,6 +53,104 @@ export const WELCOME_TEAM_STARTERS = [
 export type WelcomeTeamAgents = [ManagedAgent, ManagedAgent, ManagedAgent];
 
 const welcomeTeamPromises = new Map<string, Promise<WelcomeTeamAgents>>();
+
+/**
+ * Build-time kill switch for Welcome Team provisioning. A shared-relay
+ * operator can bake `VITE_BUZZ_WELCOME_TEAM_SEED=off` into release builds so
+ * fresh installs stop creating starter identities entirely (the collision
+ * guard in {@link resolveWelcomeStarterDisplayName} already prevents duplicate
+ * display names; this removes the identities themselves).
+ */
+export function welcomeTeamSeedDisabled(): boolean {
+  return import.meta.env?.VITE_BUZZ_WELCOME_TEAM_SEED === "off";
+}
+
+/** Relay page size for the name-collision lookup when creating a starter. */
+const WELCOME_STARTER_NAME_SEARCH_LIMIT = 100;
+
+export function normalizeDisplayName(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+/**
+ * Pick the display name for a freshly created Welcome starter.
+ *
+ * Every fresh install publishes a new community profile per starter, so on a
+ * shared relay a second install would collide with an earlier profile under
+ * the same name: duplicate members in the directory and ambiguous mentions.
+ * When the canonical name is already held by a visible profile this install
+ * does not own, the starter is created under the next free `Name-2`,
+ * `Name-3` variant instead — the team keeps working without ever duplicating
+ * a visible name. Comparison ignores case and surrounding whitespace, matching
+ * how profile names are presented to users.
+ */
+export function resolveWelcomeStarterDisplayName(
+  starterName: string,
+  takenDisplayNames: readonly string[],
+): string {
+  const taken = new Set(takenDisplayNames.map(normalizeDisplayName));
+  let candidate = starterName;
+  let suffix = 1;
+  while (taken.has(normalizeDisplayName(candidate))) {
+    suffix += 1;
+    candidate = `${starterName}-${suffix}`;
+  }
+  return candidate;
+}
+
+/**
+ * Display names already held by visible community profiles this install does
+ * not own. Local records are excluded — their profiles belong to this
+ * install — and archived identities are excluded because member lists hide
+ * them, so an archived namesake must not force a suffix onto a fresh install.
+ *
+ * A failed lookup degrades to the canonical name: onboarding runs right after
+ * the relay was reachable (the Welcome channel was just ensured through it),
+ * and stranding the welcome team over a transient search error is worse than
+ * a re-seeded name. This is best effort by design, not an authoritative
+ * success path.
+ */
+async function takenWelcomeStarterDisplayNames(
+  starterNames: readonly string[],
+  localAgents: readonly ManagedAgent[],
+): Promise<string[]> {
+  const localPubkeys = new Set(
+    localAgents.map((agent) => normalizePubkey(agent.pubkey)),
+  );
+  const archivedPubkeys = new Set<string>();
+  try {
+    const snapshot = await listArchivedIdentities();
+    for (const pubkey of snapshot.archived) {
+      archivedPubkeys.add(normalizePubkey(pubkey));
+    }
+  } catch (error) {
+    console.warn(
+      "Welcome team: archived-identity snapshot unavailable; archived namesakes may still claim a suffix.",
+      error,
+    );
+  }
+
+  const taken = new Set<string>();
+  for (const name of starterNames) {
+    let users: UserSearchResult[];
+    try {
+      users = (await searchUsers(name, WELCOME_STARTER_NAME_SEARCH_LIMIT))
+        .users;
+    } catch (error) {
+      console.warn(
+        `Welcome team: profile lookup for "${name}" failed; creating with the canonical name.`,
+        error,
+      );
+      continue;
+    }
+    for (const user of users) {
+      const pubkey = normalizePubkey(user.pubkey);
+      if (localPubkeys.has(pubkey) || archivedPubkeys.has(pubkey)) continue;
+      if (user.displayName) taken.add(user.displayName);
+    }
+  }
+  return [...taken];
+}
 
 function normalizeRelayUrl(relayUrl: string | null | undefined) {
   return relayUrl?.trim().replace(/\/+$/, "") ?? null;
@@ -323,7 +424,16 @@ async function provisionWelcomeTeam(
   channelId: string,
   relayUrl?: string | null,
 ): Promise<WelcomeTeamAgents> {
+  if (welcomeTeamSeedDisabled()) {
+    throw new Error(
+      "Welcome Team seeding is disabled by build configuration (VITE_BUZZ_WELCOME_TEAM_SEED=off).",
+    );
+  }
   const existingAgents = await listManagedAgents();
+  const takenDisplayNames = await takenWelcomeStarterDisplayNames(
+    WELCOME_TEAM_STARTERS.map(({ name }) => name),
+    existingAgents,
+  );
   await ensureWelcomeTeamPersonasActive();
   const [personas, runtimeCatalog, globalConfig, agentAccessOwnerOnly] =
     await Promise.all([
@@ -367,7 +477,14 @@ async function provisionWelcomeTeam(
       continue;
     }
 
-    const created = await createManagedAgent(desired);
+    // A fresh install creates fresh identities: resolve the starter's display
+    // name against the relay's visible profiles so this install never
+    // publishes a second profile under a name another member already holds.
+    const displayName = resolveWelcomeStarterDisplayName(
+      starter.name,
+      takenDisplayNames,
+    );
+    const created = await createManagedAgent({ ...desired, name: displayName });
     agents.push(created.agent);
   }
   const [lead, honey, pollen] = agents;
