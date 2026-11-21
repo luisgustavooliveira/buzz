@@ -143,6 +143,7 @@ jobs:
           BUZZ_BUILD_AUTO_CONNECT_DEFAULT_RELAY: "1"
           BUZZ_BUILD_DEMO_SLUG: snps
           VITE_BUZZ_BRAND: snps
+          VITE_BUZZ_REPLY_ADDRESS: "on"
           CMAKE_POLICY_VERSION_MINIMUM: "3.5"
 
       # A Windows absolute frontendDist once parsed as a URL and Tauri silently
