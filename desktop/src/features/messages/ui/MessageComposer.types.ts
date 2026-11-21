@@ -29,6 +29,14 @@ export type MessageComposerProps = {
   audienceContext?: {
     rootTags?: readonly string[][];
     type: "thread";
+    /**
+     * Effective reply parent (explicit reply target, else the thread head):
+     * its event id and author pubkey. Consumed by one-shot reply agent
+     * addressing, which pre-addresses the parent's author when it is a
+     * known agent.
+     */
+    parentAuthorPubkey?: string | null;
+    parentEventId?: string | null;
   } | null;
   channelId?: string | null;
   channelName: string;
