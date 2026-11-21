@@ -60,6 +60,7 @@ import { useComposerContentState } from "./useComposerContentState";
 import { useComposerPasteHandler } from "./useComposerPasteHandler";
 import { useDraftPersistLifecycle } from "./useDraftPersistSnapshot";
 import { useImplicitAgentMentionProvenance } from "./useImplicitAgentMentionProvenance";
+import { useReplyAgentAddressSeed } from "./useReplyAgentAddressSeed";
 import { useThreadAgentAudience } from "./useThreadAgentAudience";
 import { submitMessageEdit } from "./submitMessageEdit";
 import { prepareBackgroundLinkPreviews } from "@/features/messages/lib/linkPreviewPreparationStore";
@@ -483,6 +484,17 @@ function MessageComposerImpl({
     if (!audienceScope || editTarget != null) return;
     restoreAddressedAgentMentions();
   }, [audienceScope, editTarget, restoreAddressedAgentMentions]);
+  const replyAddressPlainText = React.useCallback(
+    () => richText.getPlainTextAndCursor().text,
+    [richText.getPlainTextAndCursor],
+  );
+  useReplyAgentAddressSeed({
+    audienceContext,
+    editTarget,
+    getPlainText: replyAddressPlainText,
+    isAgentPubkey: mentions.isAgentPubkey,
+    restoreAddressedAgentMentions,
+  });
   syncAddressedAgentsFromTextRef.current = syncAddressedAgentsFromText;
   const applyChannelInsert = React.useCallback(
     (suggestion: ChannelSuggestion) => {

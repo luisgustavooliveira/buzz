@@ -835,6 +835,11 @@ export function MessageThreadPanel({
               audienceContext={{
                 type: "thread",
                 rootTags: threadHead.tags,
+                parentEventId: replyTargetMessage?.id ?? threadHeadId,
+                parentAuthorPubkey:
+                  (replyTargetMessage ?? threadHead)?.signerPubkey ??
+                  (replyTargetMessage ?? threadHead)?.pubkey ??
+                  null,
               }}
               channelId={channelId}
               channelName={channelName}
