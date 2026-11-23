@@ -119,9 +119,10 @@ export function MessageThreadSummaryRow({
     THREAD_SUMMARY_SURFACE_AVATAR_INSET_REM,
   )})`;
   const replyLabel = summary.replyCount === 1 ? "reply" : "replies";
+  const hasUnread = unreadCount != null && unreadCount > 0;
   const summaryAriaLabel = summary.lastReplyAt
-    ? `View thread with ${summary.replyCount} ${replyLabel}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
-    : `View thread with ${summary.replyCount} ${replyLabel}`;
+    ? `View thread with ${summary.replyCount} ${replyLabel}${hasUnread ? `, ${unreadCount} new` : ""}, last reply ${formatThreadSummaryLastReplyTime(summary.lastReplyAt)}`
+    : `View thread with ${summary.replyCount} ${replyLabel}${hasUnread ? `, ${unreadCount} new` : ""}`;
   const guideDepths = depthGuideDepths
     ? [...depthGuideDepths]
     : Array.from({ length: Math.max(0, depth - 1) }, (_, index) => index + 1);
@@ -272,9 +273,12 @@ export function MessageThreadSummaryRow({
             <span className="font-medium transition-colors group-hover:text-foreground">
               {summary.replyCount} {replyLabel}
             </span>
-            {unreadCount != null && unreadCount > 0 ? (
-              <span className="ml-1" data-testid="thread-unread-badge">
-                ({unreadCount} new)
+            {hasUnread ? (
+              <span
+                className="ml-1.5 inline-flex items-center rounded-full bg-primary/15 px-1.5 text-2xs font-semibold leading-4 text-primary"
+                data-testid="thread-unread-badge"
+              >
+                {unreadCount} new
               </span>
             ) : null}
             {summary.lastReplyAt ? (
